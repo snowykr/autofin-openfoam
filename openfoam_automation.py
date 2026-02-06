@@ -7,8 +7,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from fin_wall_stl import generate_fin_wall_geometry
-
 
 @dataclass(frozen=True)
 class GeometryParams:
@@ -69,22 +67,211 @@ def _blockmesh_cell_count(length: float, cell_size: float, min_cells: int = 10) 
 
 
 def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> str:
-    # Physical domain (x) is exactly wall+gap+wall; no outer fluid margin.
-    x_min = -geom.gap / 2 - geom.T
-    x_max = geom.gap / 2 + geom.T
-    # Keep y/z tight to the wall extents.
-    y_min = 0.0
-    y_max = geom.H_wall
-    z_min = 0.0
-    z_max = geom.W_wall
+    if geom.L > geom.gap:
+        raise ValueError(
+            "Invalid geometry for fin protrusion length: require L <= gap to avoid penetrating the opposite wall."
+        )
 
-    Lx = x_max - x_min
-    Ly = y_max - y_min
-    Lz = z_max - z_min
+    if geom.H_wall <= 0 or geom.W_wall <= 0 or geom.T <= 0 or geom.gap <= 0:
+        raise ValueError("Invalid geometry: gap, T, H_wall, and W_wall must be > 0")
 
-    nx = _blockmesh_cell_count(Lx, mesh.background_cell_size)
-    ny = _blockmesh_cell_count(Ly, mesh.background_cell_size)
-    nz = _blockmesh_cell_count(Lz, mesh.background_cell_size)
+    num_y = _max_count_with_gap(geom.H_wall, geom.t, geom.p)
+    num_z = _max_count_with_gap(geom.W_wall, geom.t, geom.p)
+    used_y = num_y * geom.t + (num_y - 1) * geom.p if num_y > 0 else 0.0
+    used_z = num_z * geom.t + (num_z - 1) * geom.p if num_z > 0 else 0.0
+    y_start = (geom.H_wall - used_y) / 2 if geom.H_wall > 0 else 0.0
+    z_start = (geom.W_wall - used_z) / 2 if geom.W_wall > 0 else 0.0
+    pitch = geom.t + geom.p
+
+    def _unique_sorted(vals: list[float], eps: float = 1e-12) -> list[float]:
+        out: list[float] = []
+        for v in sorted(vals):
+            if not out or abs(v - out[-1]) > eps:
+                out.append(v)
+        return out
+
+    x_planes = _unique_sorted(
+        [
+            -geom.gap / 2 - geom.T,
+            -geom.gap / 2,
+            -geom.gap / 2 + geom.L,
+            geom.gap / 2 - geom.L,
+            geom.gap / 2,
+            geom.gap / 2 + geom.T,
+        ]
+    )
+
+    y_planes_raw = [0.0, geom.H_wall]
+    z_planes_raw = [0.0, geom.W_wall]
+    if num_y > 0 and num_z > 0:
+        for iy in range(num_y):
+            y0 = y_start + iy * pitch
+            y1 = y0 + geom.t
+            y_planes_raw.extend([y0, y1])
+        for iz in range(num_z):
+            z0 = z_start + iz * pitch
+            z1 = z0 + geom.t
+            z_planes_raw.extend([z0, z1])
+
+    y_planes = _unique_sorted(y_planes_raw)
+    z_planes = _unique_sorted(z_planes_raw)
+
+    nxp = len(x_planes)
+    nyp = len(y_planes)
+    nzp = len(z_planes)
+    if nxp < 2 or nyp < 2 or nzp < 2:
+        raise ValueError("Failed to build valid blockMesh plane set")
+
+    def v_idx(ix: int, iy: int, iz: int) -> int:
+        return ix + nxp * (iy + nyp * iz)
+
+    def _tile_side(y: float, z: float) -> str | None:
+        if num_y <= 0 or num_z <= 0 or pitch <= 0:
+            return None
+        if not (y_start <= y <= y_start + used_y and z_start <= z <= z_start + used_z):
+            return None
+
+        iy = int((y - y_start) / pitch)
+        iz = int((z - z_start) / pitch)
+        iy = min(max(iy, 0), num_y - 1)
+        iz = min(max(iz, 0), num_z - 1)
+
+        y0 = y_start + iy * pitch
+        z0 = z_start + iz * pitch
+        in_fin = (y0 <= y < y0 + geom.t) and (z0 <= z < z0 + geom.t)
+        if not in_fin:
+            return None
+        return "left" if (iy + iz) % 2 == 0 else "right"
+
+    def _zone_for_cell(x_mid: float, y_mid: float, z_mid: float) -> str:
+        left_wall_inner = -geom.gap / 2
+        right_wall_inner = geom.gap / 2
+        left_tip = -geom.gap / 2 + geom.L
+        right_tip = geom.gap / 2 - geom.L
+
+        if x_mid <= left_wall_inner:
+            return "solid_left"
+        if x_mid >= right_wall_inner:
+            return "solid_right"
+
+        side = _tile_side(y_mid, z_mid)
+        if side == "left" and x_mid <= left_tip:
+            return "solid_left"
+        if side == "right" and x_mid >= right_tip:
+            return "solid_right"
+        return "fluid"
+
+    vertex_lines: list[str] = []
+    vid = 0
+    for iz in range(nzp):
+        z = z_planes[iz]
+        for iy in range(nyp):
+            y = y_planes[iy]
+            for ix in range(nxp):
+                x = x_planes[ix]
+                vertex_lines.append(f"    ({x:.9f} {y:.9f} {z:.9f})  // {vid}")
+                vid += 1
+
+    block_lines: list[str] = []
+    for ix in range(nxp - 1):
+        x0 = x_planes[ix]
+        x1 = x_planes[ix + 1]
+        nx = _blockmesh_cell_count(x1 - x0, mesh.background_cell_size, min_cells=1)
+        x_mid = 0.5 * (x0 + x1)
+        for iy in range(nyp - 1):
+            y0 = y_planes[iy]
+            y1 = y_planes[iy + 1]
+            ny = _blockmesh_cell_count(y1 - y0, mesh.background_cell_size, min_cells=1)
+            y_mid = 0.5 * (y0 + y1)
+            for iz in range(nzp - 1):
+                z0 = z_planes[iz]
+                z1 = z_planes[iz + 1]
+                nz = _blockmesh_cell_count(
+                    z1 - z0, mesh.background_cell_size, min_cells=1
+                )
+                z_mid = 0.5 * (z0 + z1)
+
+                zone = _zone_for_cell(x_mid, y_mid, z_mid)
+                v000 = v_idx(ix, iy, iz)
+                v100 = v_idx(ix + 1, iy, iz)
+                v110 = v_idx(ix + 1, iy + 1, iz)
+                v010 = v_idx(ix, iy + 1, iz)
+                v001 = v_idx(ix, iy, iz + 1)
+                v101 = v_idx(ix + 1, iy, iz + 1)
+                v111 = v_idx(ix + 1, iy + 1, iz + 1)
+                v011 = v_idx(ix, iy + 1, iz + 1)
+                block_lines.append(
+                    "    hex "
+                    + f"({v000} {v100} {v110} {v010} {v001} {v101} {v111} {v011}) "
+                    + f"{zone} ({nx} {ny} {nz}) simpleGrading (1 1 1)"
+                )
+
+    faces: list[tuple[int, int, int, int]] = []
+
+    # x-min / x-max
+    for iy in range(nyp - 1):
+        for iz in range(nzp - 1):
+            faces.append(
+                (
+                    v_idx(0, iy, iz),
+                    v_idx(0, iy, iz + 1),
+                    v_idx(0, iy + 1, iz + 1),
+                    v_idx(0, iy + 1, iz),
+                )
+            )
+            faces.append(
+                (
+                    v_idx(nxp - 1, iy + 1, iz),
+                    v_idx(nxp - 1, iy + 1, iz + 1),
+                    v_idx(nxp - 1, iy, iz + 1),
+                    v_idx(nxp - 1, iy, iz),
+                )
+            )
+
+    # y-min / y-max
+    for ix in range(nxp - 1):
+        for iz in range(nzp - 1):
+            faces.append(
+                (
+                    v_idx(ix + 1, 0, iz),
+                    v_idx(ix + 1, 0, iz + 1),
+                    v_idx(ix, 0, iz + 1),
+                    v_idx(ix, 0, iz),
+                )
+            )
+            faces.append(
+                (
+                    v_idx(ix, nyp - 1, iz),
+                    v_idx(ix, nyp - 1, iz + 1),
+                    v_idx(ix + 1, nyp - 1, iz + 1),
+                    v_idx(ix + 1, nyp - 1, iz),
+                )
+            )
+
+    # z-min / z-max
+    for ix in range(nxp - 1):
+        for iy in range(nyp - 1):
+            faces.append(
+                (
+                    v_idx(ix, iy, 0),
+                    v_idx(ix, iy + 1, 0),
+                    v_idx(ix + 1, iy + 1, 0),
+                    v_idx(ix + 1, iy, 0),
+                )
+            )
+            faces.append(
+                (
+                    v_idx(ix, iy, nzp - 1),
+                    v_idx(ix + 1, iy, nzp - 1),
+                    v_idx(ix + 1, iy + 1, nzp - 1),
+                    v_idx(ix, iy + 1, nzp - 1),
+                )
+            )
+
+    face_lines = [f"            ({a} {b} {c} {d})" for (a, b, c, d) in faces]
+    vertices_block = "\n".join(vertex_lines)
+    blocks_block = "\n".join(block_lines)
+    boundary_faces_block = "\n".join(face_lines)
 
     return f"""/*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
@@ -102,23 +289,16 @@ FoamFile
 }}
 // Generated by openfoam_automation.py
 
-scale   1;
+scale 1;
 
 vertices
 (
-    ({x_min:.6f}  {y_min:.6f}  {z_min:.6f})  // 0
-    ({x_max:.6f}  {y_min:.6f}  {z_min:.6f})  // 1
-    ({x_max:.6f}  {y_max:.6f}  {z_min:.6f})  // 2
-    ({x_min:.6f}  {y_max:.6f}  {z_min:.6f})  // 3
-    ({x_min:.6f}  {y_min:.6f}  {z_max:.6f})  // 4
-    ({x_max:.6f}  {y_min:.6f}  {z_max:.6f})  // 5
-    ({x_max:.6f}  {y_max:.6f}  {z_max:.6f})  // 6
-    ({x_min:.6f}  {y_max:.6f}  {z_max:.6f})  // 7
+{vertices_block}
 );
 
 blocks
 (
-    hex (0 1 2 3 4 5 6 7) ({nx} {ny} {nz}) simpleGrading (1 1 1)
+{blocks_block}
 );
 
 edges
@@ -131,12 +311,7 @@ boundary
         type patch;
         faces
         (
-            (3 7 6 2)  // yMax
-            (1 5 4 0)  // yMin
-            (0 4 7 3)  // xMin
-            (2 6 5 1)  // xMax
-            (0 3 2 1)  // zMin
-            (4 5 6 7)  // zMax
+{boundary_faces_block}
         );
     }}
 );
@@ -807,15 +982,15 @@ def write_openfoam_case_files(
 ) -> None:
     system_dir = case_dir / "system"
     constant_dir = case_dir / "constant"
-    tri_surface_dir = case_dir / "constant" / "triSurface"
-    ext_features_dir = case_dir / "constant" / "extendedFeatureEdgeMesh"
     system_dir.mkdir(parents=True, exist_ok=True)
     constant_dir.mkdir(parents=True, exist_ok=True)
-    tri_surface_dir.mkdir(parents=True, exist_ok=True)
-    ext_features_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove stale feature dictionaries (generated depending on feature_tool).
-    for dict_name in ["surfaceFeaturesDict", "surfaceFeatureExtractDict"]:
+    # Remove stale snappy/feature dictionaries from prior workflows.
+    for dict_name in [
+        "surfaceFeaturesDict",
+        "surfaceFeatureExtractDict",
+        "snappyHexMeshDict",
+    ]:
         try:
             (system_dir / dict_name).unlink()
         except FileNotFoundError:
@@ -826,41 +1001,6 @@ def write_openfoam_case_files(
         (system_dir / "regionSolvers").unlink()
     except FileNotFoundError:
         pass
-
-    # Remove previously generated STL files so snappyHexMeshDict does not pick up stale geometry.
-    # NOTE: constant/triSurface is treated as autogenerated output in this repo.
-    for f in tri_surface_dir.glob("*.stl"):
-        try:
-            f.unlink()
-        except FileNotFoundError:
-            pass
-
-    # Remove previously generated feature files (avoid stale feature snapping).
-    for pattern in ["*.eMesh", "*.obj"]:
-        for f in tri_surface_dir.glob(pattern):
-            try:
-                f.unlink()
-            except FileNotFoundError:
-                pass
-
-    # surfaceFeatures (OpenFOAM.org/Foundation) writes to constant/extendedFeatureEdgeMesh
-    for pattern in ["*.extendedFeatureEdgeMesh", "*.obj"]:
-        for f in ext_features_dir.glob(pattern):
-            try:
-                f.unlink()
-            except FileNotFoundError:
-                pass
-
-    generate_fin_wall_geometry(
-        gap=geom.gap,
-        T=geom.T,
-        H_wall=geom.H_wall,
-        W_wall=geom.W_wall,
-        p=geom.p,
-        t=geom.t,
-        L=geom.L,
-        output_dir=str(tri_surface_dir),
-    )
 
     (system_dir / "controlDict").write_text(
         generate_controldict_text(), encoding="utf-8"
@@ -874,33 +1014,12 @@ def write_openfoam_case_files(
     (constant_dir / "materialProperties").write_text(
         generate_materialproperties_text(), encoding="utf-8"
     )
-    if mesh.feature_snap:
-        if mesh.feature_tool == "surfaceFeatures":
-            (system_dir / "surfaceFeaturesDict").write_text(
-                generate_surfacefeaturesdict_text(tri_surface_dir, mesh),
-                encoding="utf-8",
-            )
-        else:
-            (system_dir / "surfaceFeatureExtractDict").write_text(
-                generate_surfacefeatureextractdict_text(tri_surface_dir, mesh),
-                encoding="utf-8",
-            )
-    (system_dir / "snappyHexMeshDict").write_text(
-        generate_snappyhexmeshdict_text(geom, mesh, tri_surface_dir), encoding="utf-8"
-    )
 
-    # Helper script for the common --write-only + Docker workflow.
-    # This enforces the required command ordering when feature snapping is enabled.
+    # Helper script for blockMesh-only + multi-region splitting workflow.
     allmesh = (
         "#!/bin/sh\n"
         "set -eu\n"
         "blockMesh > log.blockMesh 2>&1\n"
-        "if [ -f system/surfaceFeaturesDict ]; then\n"
-        "  surfaceFeatures > log.surfaceFeatures 2>&1\n"
-        "elif [ -f system/surfaceFeatureExtractDict ]; then\n"
-        "  surfaceFeatureExtract > log.surfaceFeatureExtract 2>&1\n"
-        "fi\n"
-        "snappyHexMesh -overwrite > log.snappyHexMesh 2>&1\n"
         "splitMeshRegions -cellZones -overwrite -defaultRegionName fluid > log.splitMeshRegions 2>&1\n"
     )
     allmesh_path = case_dir / "Allmesh"
@@ -933,33 +1052,12 @@ def run_openfoam_meshing(case_dir: Path, mesh: MeshingParams) -> None:
         raise FileNotFoundError(
             "blockMesh not found in PATH (did you source OpenFOAM?)"
         )
-    if shutil.which("snappyHexMesh") is None:
-        raise FileNotFoundError(
-            "snappyHexMesh not found in PATH (did you source OpenFOAM?)"
-        )
     if shutil.which("splitMeshRegions") is None:
         raise FileNotFoundError(
             "splitMeshRegions not found in PATH (did you source OpenFOAM?)"
         )
-    if mesh.feature_snap:
-        if mesh.feature_tool == "surfaceFeatures":
-            if shutil.which("surfaceFeatures") is None:
-                raise FileNotFoundError(
-                    "surfaceFeatures not found in PATH (did you source OpenFOAM?)"
-                )
-        else:
-            if shutil.which("surfaceFeatureExtract") is None:
-                raise FileNotFoundError(
-                    "surfaceFeatureExtract not found in PATH (did you source OpenFOAM?)"
-                )
 
     subprocess.run(["blockMesh"], cwd=str(case_dir), check=True)
-    if mesh.feature_snap:
-        if mesh.feature_tool == "surfaceFeatures":
-            subprocess.run(["surfaceFeatures"], cwd=str(case_dir), check=True)
-        else:
-            subprocess.run(["surfaceFeatureExtract"], cwd=str(case_dir), check=True)
-    subprocess.run(["snappyHexMesh", "-overwrite"], cwd=str(case_dir), check=True)
     subprocess.run(
         [
             "splitMeshRegions",
@@ -975,7 +1073,7 @@ def run_openfoam_meshing(case_dir: Path, mesh: MeshingParams) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate geometry + OpenFOAM blockMesh/snappyHexMesh dicts and run meshing."
+        description="Generate OpenFOAM blockMeshDict for checkerboard fin walls and run blockMesh + splitMeshRegions."
     )
     parser.add_argument("--case-dir", default=".")
     parser.add_argument("--write-only", action="store_true")
@@ -988,20 +1086,7 @@ def main() -> int:
     parser.add_argument("--t", type=float, default=0.005)
     parser.add_argument("--L", type=float, default=0.12)
 
-    parser.add_argument("--background-cell-size", type=float, default=0.005)
-    parser.add_argument("--target-surface-cell-size", type=float, default=None)
-    parser.add_argument(
-        "--feature-snap",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable explicit feature snapping (default: enabled).",
-    )
-    parser.add_argument(
-        "--feature-tool",
-        choices=["surfaceFeatures", "surfaceFeatureExtract"],
-        default="surfaceFeatures",
-    )
-    parser.add_argument("--feature-included-angle-deg", type=float, default=150.0)
+    parser.add_argument("--background-cell-size", type=float, default=0.0005)
 
     args = parser.parse_args()
 
@@ -1017,10 +1102,6 @@ def main() -> int:
     )
     mesh = MeshingParams(
         background_cell_size=args.background_cell_size,
-        target_surface_cell_size=args.target_surface_cell_size,
-        feature_snap=args.feature_snap,
-        feature_tool=args.feature_tool,
-        feature_extract_included_angle_deg=args.feature_included_angle_deg,
     )
 
     write_openfoam_case_files(case_dir, geom, mesh)
