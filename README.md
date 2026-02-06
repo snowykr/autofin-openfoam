@@ -17,14 +17,11 @@
   - 블록별 `cellZone`: `solid_left`, `fluid`, `solid_right`
 - `system/controlDict`
 - `system/fvSchemes`, `system/fvSolution`
-- `constant/materialProperties`
 - `Allmesh`
   - `blockMesh`
   - `splitMeshRegions -cellZones -overwrite -defaultRegionName fluid`
 - `Allrun` (선택)
-  - `./Allmesh`
-  - `foamSetupCHT`
-  - `foamMultiRun`
+  - `paraFoam -touchAll`
 
 ## Geometry Parameters
 
@@ -54,7 +51,7 @@
 python3 openfoam_automation.py --write-only
 ```
 
-생성 전 `system/regionSolvers` 등 생성물을 정리하려면:
+생성 전 기존 생성물을 정리하려면:
 
 ```bash
 python3 openfoam_automation.py --write-only --clean-generated
@@ -66,7 +63,7 @@ python3 openfoam_automation.py --write-only --clean-generated
 python3 openfoam_automation.py \
   --write-only \
   --gap 0.30 --T 0.025 --H-wall 0.100 --W-wall 0.050 \
-  --p 0.001 --t 0.001 --L 0.120 \
+  --p 0.001 --t 0.001 --L 0.270 \
   --N-T 5 --N-gapA 3 --N-over 10 --N-t 5 --N-p 5
 ```
 
@@ -83,13 +80,11 @@ blockMesh
 splitMeshRegions -cellZones -overwrite -defaultRegionName fluid
 ```
 
-### 4) CHT 실행 (선택)
+### 4) 시각화 준비 실행 (선택)
 
 ```bash
 ./Allrun
 ```
-
-주의: `foamSetupCHT`는 케이스 루트에 `templates/` 트리를 요구합니다.
 
 ## Notes
 
