@@ -1,16 +1,18 @@
 # autofin-openfoam
 
 두 개의 wall(좌/우) 사이에, wall에서 돌출된 직육면체 fin(pin)들을 배치한 STL을 자동 생성하고,
-해당 STL을 입력으로 OpenFOAM의 `blockMesh` + `snappyHexMesh`까지(또는 dict 생성까지만) 자동화하는 프로젝트입니다.
+해당 STL을 입력으로 OpenFOAM의 `blockMesh` + `surfaceFeatures`(또는 `surfaceFeatureExtract`) + `snappyHexMesh`까지(또는 dict 생성까지만) 자동화하는 프로젝트입니다.
 
-옵션으로 feature edge를 추출(`surfaceFeatures` 또는 `surfaceFeatureExtract`)하고 `snappyHexMesh`에서 explicit feature snapping을 켤 수 있습니다.
+이 프로젝트의 기본 meshing 설정은 fin-wall 접합부 모서리 보존을 위해 **explicit feature snapping이 필수**라고 가정합니다.
+따라서 기본 워크플로우에서 `surfaceFeatures`(또는 `surfaceFeatureExtract`)를 `snappyHexMesh` 전에 실행해야 합니다.
 
 ## Requirements
 
 - Python 3.11+
 - `uv`
 - OpenFOAM (meshing까지 실행하려면 `blockMesh`, `snappyHexMesh`가 PATH에 있어야 함)
-  - `--feature-snap`을 켜면 추가로 `surfaceFeatures`(OpenFOAM.org/Foundation) 또는 `surfaceFeatureExtract`(일부 배포판)가 필요합니다.
+  - 기본값은 feature snapping ON 이므로, 추가로 `surfaceFeatures`(OpenFOAM.org/Foundation) 또는 `surfaceFeatureExtract`(일부 배포판)가 필요합니다.
+  - feature snapping을 끄려면 `--no-feature-snap`.
 
 Python 의존성은 `pyproject.toml`에 정의되어 있으며, 기본은 `numpy-stl`입니다.
 
@@ -21,8 +23,9 @@ Python 의존성은 `pyproject.toml`에 정의되어 있으며, 기본은 `numpy
   - 출력: `constant/triSurface/*.stl`
 - `openfoam_automation.py`
   - STL 생성 + `system/blockMeshDict`, `system/snappyHexMeshDict`, `system/controlDict` 생성
-  - `--feature-snap` 사용 시 `system/surfaceFeaturesDict` 또는 `system/surfaceFeatureExtractDict`도 생성
-  - 옵션으로 `blockMesh` -> (feature 추출) -> `snappyHexMesh -overwrite` 실행
+  - 기본값으로 `system/surfaceFeaturesDict`(또는 `system/surfaceFeatureExtractDict`)도 생성
+  - `blockMesh` -> feature 추출 -> `snappyHexMesh -overwrite` 순서로 실행되어야 함
+  - `Allmesh` 스크립트를 함께 생성(특히 `--write-only` + Docker 워크플로우용)
 
 ## Geometry / Parameters
 
@@ -56,7 +59,7 @@ Python 의존성은 `pyproject.toml`에 정의되어 있으며, 기본은 `numpy
   - `margin`: m
   - `background_cell_size`: m
   - `target_surface_cell_size`: m (`None`이면 자동으로 `max(t/2, 1e-6)` m 사용)
-  - `feature_included_angle_deg`: degree (deg, feature 추출 임계각. `--feature-snap`일 때만 사용)
+  - `feature_included_angle_deg`: degree (deg, feature 추출 임계각)
 - Meshing (내부 설정값)
   - `max_local_cells`, `max_global_cells`, `min_refinement_cells`, `n_cells_between_levels`: 무차원(셀 개수/레벨 관련 정수)
   - `resolve_feature_angle_deg`: degree (deg)
@@ -103,14 +106,14 @@ uv run python openfoam_automation.py --case-dir ./case1 --write-only
 
 ### 3) meshing까지 자동 실행
 
-meshing(`blockMesh`, `snappyHexMesh`) 실행 방법은 OpenFOAM을 어떻게 설치했는지에 따라 달라집니다.
+meshing(`blockMesh`, feature 추출, `snappyHexMesh`) 실행 방법은 OpenFOAM을 어떻게 설치했는지에 따라 달라집니다.
 
 - 로컬에 OpenFOAM이 설치되어 있고, `blockMesh`/`snappyHexMesh`가 PATH에 잡히는 경우
 - macOS에서 `openfoam-dev-macos`(Docker)로 OpenFOAM을 쓰는 경우
 
 ```bash
 # (A) 로컬 OpenFOAM 설치 (주로 Linux)
-# OpenFOAM 환경 로드 후, python runner가 blockMesh/snappyHexMesh까지 호출
+# OpenFOAM 환경 로드 후, python runner가 blockMesh/feature 추출/snappyHexMesh까지 호출
 source /opt/openfoam*/etc/bashrc
 uv run python openfoam_automation.py
 
@@ -118,16 +121,11 @@ uv run python openfoam_automation.py
 # 호스트에서 case 파일만 생성하고, meshing은 컨테이너 안에서 실행
 uv run python openfoam_automation.py --write-only
 openfoam-dev-macos
+./Allmesh
+
+# Allmesh 없이 수동으로 하면:
 blockMesh
-snappyHexMesh -overwrite
-
-# (옵션) feature snapping을 쓰려면, snappy 전에 feature 추출을 실행
-# OpenFOAM.org/Foundation: surfaceFeatures
 surfaceFeatures
-snappyHexMesh -overwrite
-
-# (옵션) 일부 배포판: surfaceFeatureExtract
-surfaceFeatureExtract
 snappyHexMesh -overwrite
 ```
 
@@ -146,14 +144,19 @@ uv run python openfoam_automation.py \
   --target-surface-cell-size 0.0025
 ```
 
-feature snapping(옵션)까지 케이스 생성:
+feature snapping 파라미터 변경 예시:
 
 ```bash
 uv run python openfoam_automation.py \
   --write-only \
-  --feature-snap \
   --feature-tool surfaceFeatures \
   --feature-included-angle-deg 150
+```
+
+feature snapping을 끄고(권장하지 않음) 예전처럼 `blockMesh` + `snappyHexMesh`만 쓰려면:
+
+```bash
+uv run python openfoam_automation.py --write-only --no-feature-snap
 ```
 
 ### 5) 시각화 (host ParaView)
@@ -194,9 +197,10 @@ uv run python openfoam_automation.py -h
 - `system/blockMeshDict`
 - `system/snappyHexMeshDict`
 - `system/controlDict`
-  - `--feature-snap` 사용 시 추가로 아래 중 하나가 생성됨
+  - 기본값으로 아래 중 하나가 생성됨
     - `system/surfaceFeaturesDict` (OpenFOAM.org/Foundation)
     - `system/surfaceFeatureExtractDict` (일부 배포판)
+  - `Allmesh` (blockMesh -> feature 추출 -> snappyHexMesh 실행 스크립트)
 
 ## Git notes
 
@@ -208,10 +212,10 @@ uv run python openfoam_automation.py -h
 ## Manual OpenFOAM commands (if not using python runner)
 
 ```bash
-blockMesh
-snappyHexMesh -overwrite
+./Allmesh
 
-# (옵션) feature snapping
+# 또는 수동 실행
+blockMesh
 surfaceFeatures
 snappyHexMesh -overwrite
 ```

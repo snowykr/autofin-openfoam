@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+blockMesh > log.blockMesh 2>&1
+if [ -f system/surfaceFeaturesDict ]; then
+  surfaceFeatures > log.surfaceFeatures 2>&1
+elif [ -f system/surfaceFeatureExtractDict ]; then
+  surfaceFeatureExtract > log.surfaceFeatureExtract 2>&1
+fi
+snappyHexMesh -overwrite > log.snappyHexMesh 2>&1

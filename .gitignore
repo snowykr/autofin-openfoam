@@ -22,6 +22,10 @@ __pycache__/
 *.OpenFOAM
 /.OpenFOAM/
 
+# OpenFOAM logs (e.g. log.snappyHexMesh)
+log.*
+log.*.gz
+
 # OpenFOAM generated mesh and auxiliary fields
 /0/cellLevel
 /0/pointLevel

@@ -31,10 +31,10 @@ class MeshingParams:
     min_refinement_cells: int = 10
     n_cells_between_levels: int = 2
     resolve_feature_angle_deg: float = 30.0
-    # Feature snapping is optional because many workflows generate dicts with
-    # --write-only and run OpenFOAM commands manually (e.g., in Docker).
-    # If enabled, you must run the chosen feature extraction tool before snappyHexMesh.
-    feature_snap: bool = False
+    # Feature snapping is enabled by default because it is required to preserve
+    # sharp fin-wall edges reliably for this geometry.
+    # NOTE: When using --write-only, you must run the feature tool before snappyHexMesh.
+    feature_snap: bool = True
     feature_tool: str = "surfaceFeatures"  # or "surfaceFeatureExtract"
     feature_extract_included_angle_deg: float = 150.0
 
@@ -628,8 +628,17 @@ def write_openfoam_case_files(
 ) -> None:
     system_dir = case_dir / "system"
     tri_surface_dir = case_dir / "constant" / "triSurface"
+    ext_features_dir = case_dir / "constant" / "extendedFeatureEdgeMesh"
     system_dir.mkdir(parents=True, exist_ok=True)
     tri_surface_dir.mkdir(parents=True, exist_ok=True)
+    ext_features_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove stale feature dictionaries (generated depending on feature_tool).
+    for dict_name in ["surfaceFeaturesDict", "surfaceFeatureExtractDict"]:
+        try:
+            (system_dir / dict_name).unlink()
+        except FileNotFoundError:
+            pass
 
     # Remove previously generated STL files so snappyHexMeshDict does not pick up stale geometry.
     for pattern in [
@@ -647,6 +656,14 @@ def write_openfoam_case_files(
     # Remove previously generated feature files (avoid stale feature snapping).
     for pattern in ["*.eMesh", "*.obj"]:
         for f in tri_surface_dir.glob(pattern):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+
+    # surfaceFeatures (OpenFOAM.org/Foundation) writes to constant/extendedFeatureEdgeMesh
+    for pattern in ["*.extendedFeatureEdgeMesh", "*.obj"]:
+        for f in ext_features_dir.glob(pattern):
             try:
                 f.unlink()
             except FileNotFoundError:
@@ -683,6 +700,27 @@ def write_openfoam_case_files(
     (system_dir / "snappyHexMeshDict").write_text(
         generate_snappyhexmeshdict_text(geom, mesh, tri_surface_dir), encoding="utf-8"
     )
+
+    # Helper script for the common --write-only + Docker workflow.
+    # This enforces the required command ordering when feature snapping is enabled.
+    allmesh = (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "blockMesh > log.blockMesh 2>&1\n"
+        "if [ -f system/surfaceFeaturesDict ]; then\n"
+        "  surfaceFeatures > log.surfaceFeatures 2>&1\n"
+        "elif [ -f system/surfaceFeatureExtractDict ]; then\n"
+        "  surfaceFeatureExtract > log.surfaceFeatureExtract 2>&1\n"
+        "fi\n"
+        "snappyHexMesh -overwrite > log.snappyHexMesh 2>&1\n"
+    )
+    allmesh_path = case_dir / "Allmesh"
+    allmesh_path.write_text(allmesh, encoding="utf-8")
+    try:
+        allmesh_path.chmod(0o755)
+    except OSError:
+        # Best-effort; e.g. on some filesystems chmod may be disallowed.
+        pass
 
 
 def run_openfoam_meshing(case_dir: Path, mesh: MeshingParams) -> None:
@@ -733,7 +771,12 @@ def main() -> int:
     parser.add_argument("--margin", type=float, default=0.02)
     parser.add_argument("--background-cell-size", type=float, default=0.005)
     parser.add_argument("--target-surface-cell-size", type=float, default=None)
-    parser.add_argument("--feature-snap", action="store_true")
+    parser.add_argument(
+        "--feature-snap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable explicit feature snapping (default: enabled).",
+    )
     parser.add_argument(
         "--feature-tool",
         choices=["surfaceFeatures", "surfaceFeatureExtract"],
