@@ -23,91 +23,109 @@ geometry
     fin_left_y0_z0.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y0_z0.stl";
         name fin_left_y0_z0;
     }
     fin_left_y0_z2.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y0_z2.stl";
         name fin_left_y0_z2;
     }
     fin_left_y1_z1.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y1_z1.stl";
         name fin_left_y1_z1;
     }
     fin_left_y1_z3.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y1_z3.stl";
         name fin_left_y1_z3;
     }
     fin_left_y2_z0.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y2_z0.stl";
         name fin_left_y2_z0;
     }
     fin_left_y2_z2.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y2_z2.stl";
         name fin_left_y2_z2;
     }
     fin_left_y3_z1.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y3_z1.stl";
         name fin_left_y3_z1;
     }
     fin_left_y3_z3.stl
     {
         type triSurfaceMesh;
+        file "fin_left_y3_z3.stl";
         name fin_left_y3_z3;
     }
     fin_right_y0_z1.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y0_z1.stl";
         name fin_right_y0_z1;
     }
     fin_right_y0_z3.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y0_z3.stl";
         name fin_right_y0_z3;
     }
     fin_right_y1_z0.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y1_z0.stl";
         name fin_right_y1_z0;
     }
     fin_right_y1_z2.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y1_z2.stl";
         name fin_right_y1_z2;
     }
     fin_right_y2_z1.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y2_z1.stl";
         name fin_right_y2_z1;
     }
     fin_right_y2_z3.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y2_z3.stl";
         name fin_right_y2_z3;
     }
     fin_right_y3_z0.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y3_z0.stl";
         name fin_right_y3_z0;
     }
     fin_right_y3_z2.stl
     {
         type triSurfaceMesh;
+        file "fin_right_y3_z2.stl";
         name fin_right_y3_z2;
     }
     wall_left.stl
     {
         type triSurfaceMesh;
+        file "wall_left.stl";
         name wall_left;
     }
     wall_right.stl
     {
         type triSurfaceMesh;
+        file "wall_right.stl";
         name wall_right;
     }
 }
@@ -223,7 +241,7 @@ castellatedMeshControls
     {
     }
 
-    locationInMesh (0.000000 0.025000 0.025000);
+    locationInMesh (0.0000000000 0.0250000000 0.0250000000);
     allowFreeStandingZoneFaces true;
 }
 

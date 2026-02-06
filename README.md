@@ -54,6 +54,10 @@ fin이 중앙에서 서로 "교차(겹침)"하도록 하기 위해 아래 조건
 - `L > gap/2` : 좌/우 fin이 gap 중앙에서 x방향으로 겹치도록
 - `L <= gap` : 반대편 wall을 관통하지 않도록
 
+추가 제약(현재 `fin_wall_stl.py` 구현):
+
+- 좌/우 wall에 fin이 최소 1개씩 있어야 합니다. (즉, y-z 그리드 셀이 최소 2개 필요)
+
 ## Usage
 
 ### 1) Install python deps (uv)
@@ -78,12 +82,27 @@ uv run python openfoam_automation.py --case-dir ./case1 --write-only
 
 ### 3) meshing까지 자동 실행
 
-OpenFOAM 환경을 먼저 로드한 뒤 실행합니다.
+meshing(`blockMesh`, `snappyHexMesh`) 실행 방법은 OpenFOAM을 어떻게 설치했는지에 따라 달라집니다.
+
+- 로컬에 OpenFOAM이 설치되어 있고, `blockMesh`/`snappyHexMesh`가 PATH에 잡히는 경우
+- macOS에서 `openfoam-dev-macos`(Docker)로 OpenFOAM을 쓰는 경우
 
 ```bash
+# (A) 로컬 OpenFOAM 설치 (주로 Linux)
+# OpenFOAM 환경 로드 후, python runner가 blockMesh/snappyHexMesh까지 호출
 source /opt/openfoam*/etc/bashrc
 uv run python openfoam_automation.py
+
+# (B) macOS: openfoam-dev-macos (Docker)
+# 호스트에서 case 파일만 생성하고, meshing은 컨테이너 안에서 실행
+uv run python openfoam_automation.py --write-only
+openfoam-dev-macos
+blockMesh
+snappyHexMesh -overwrite
 ```
+
+참고:
+- zsh에서 `source /opt/openfoam*/etc/bashrc`가 `no matches found`로 실패하면, 해당 경로에 OpenFOAM이 설치되어 있지 않은 경우입니다. 이때는 (B)처럼 Docker를 쓰거나, 실제 설치 경로로 `bashrc`를 지정하세요.
 
 ### 4) 파라미터 변경 예시
 
@@ -96,6 +115,28 @@ uv run python openfoam_automation.py \
   --background-cell-size 0.005 \
   --target-surface-cell-size 0.0025
 ```
+
+### 5) 시각화 (host ParaView)
+
+macOS/Homebrew ParaView에서 `paraview --data=...`로 열 때는 `case.foam` 더미 파일을 쓰는 것이 가장 호환성이 좋습니다.
+
+```bash
+touch case.foam
+paraview --data="$(pwd)/case.foam"
+```
+
+참고:
+- 위 명령의 `touch case.foam`은 파일을 "생성"만 합니다(창이 자동으로 뜨지 않음). 실제 실행은 `paraview --data=...`입니다.
+- 일부 환경에서는 `case.OpenFOAM`이 ParaView 기본 reader와 매칭되지 않을 수 있습니다.
+- 대안으로, OpenFOAM 컨테이너에서 `foamToVTK -constant -allPatches` 후 `VTK/*.vtk`를 열어도 됩니다.
+
+## Meshing notes
+
+- `blockMesh` 배경 도메인은 기본적으로 `y=[0, H_wall]`, `z=[0, W_wall]`로 타이트하게 생성합니다.
+  - 목적: wall slab의 모서리로 "바깥 영역"이 돌아나가면서 내부(gap)와 연결되는 것을 방지하고,
+    `snappyHexMesh`의 region 선택(`locationInMesh`)이 안정적으로 gap 내부만 남기도록 하기 위함입니다.
+- `locationInMesh`는 "남길 영역" 안에 반드시 있어야 하며, STL 표면이나 배경 격자 경계에 너무 가까우면 실패/오동작할 수 있습니다.
+  - `openfoam_automation.py`가 자동으로 안전한 점을 찾지만, 극단적인 파라미터(`p=0` + 단면 완전 타일링 + `L≈gap`)에서는 유체 영역이 거의/전혀 없어 실패할 수 있습니다.
 
 CLI 전체 옵션은 아래로 확인할 수 있습니다.
 
@@ -117,6 +158,9 @@ uv run python openfoam_automation.py -h
 ## Git notes
 
 - `constant/triSurface/*.stl`은 자동 생성 산출물이므로 `.gitignore`에 포함되어 있습니다.
+- `case.foam`은 ParaView용 로컬 더미 파일이며 `.gitignore`에 포함되어 있습니다.
+- `system/blockMeshDict`, `system/snappyHexMeshDict`, `system/controlDict`는 스크립트로 자동 생성되지만, 기본 케이스 설정 공유를 위해 현재 저장소에서 추적(버전 관리)합니다.
+  - 파라미터 스윕 등으로 작업 트리를 더럽히고 싶지 않으면 `--case-dir`로 별도 디렉토리에 생성하세요.
 
 ## Manual OpenFOAM commands (if not using python runner)
 

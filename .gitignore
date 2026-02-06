@@ -10,6 +10,24 @@ __pycache__/
 
 .DS_Store
 .idea/
+.bash_history
+
+# OpenFOAM runtime outputs
+/[1-9]*/
+/[1-9]*.[0-9]*/
+/processor*/
+/postProcessing/
+/VTK/
+*.foam
+*.OpenFOAM
+/.OpenFOAM/
+
+# OpenFOAM generated mesh and auxiliary fields
+/0/cellLevel
+/0/pointLevel
+/constant/polyMesh/
+/constant/extendedFeatureEdgeMesh/
+/constant/triSurface/*.eMesh
 
 # OpenFOAM generated geometry
-constant/triSurface/*.stl
+/constant/triSurface/*.stl

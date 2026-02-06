@@ -54,10 +54,12 @@ def _blockmesh_cell_count(length: float, cell_size: float, min_cells: int = 10) 
 def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> str:
     x_min = -geom.gap / 2 - geom.T - mesh.margin
     x_max = geom.gap / 2 + geom.T + mesh.margin
-    y_min = 0.0 - mesh.margin
-    y_max = geom.H_wall + mesh.margin
-    z_min = 0.0 - mesh.margin
-    z_max = geom.W_wall + mesh.margin
+    # Important: keep y/z tight to the wall extents so the region outside the
+    # wall+gap+wall footprint cannot connect around the wall edges.
+    y_min = 0.0
+    y_max = geom.H_wall
+    z_min = 0.0
+    z_max = geom.W_wall
 
     Lx = x_max - x_min
     Ly = y_max - y_min
@@ -140,26 +142,199 @@ def _surface_refinement_level(
     return int(math.ceil(math.log(ratio, 2)))
 
 
-def _safe_location_in_mesh(geom: GeometryParams) -> tuple[float, float, float]:
-    # Find a point in the y-z gap between fins (if p > 0 and at least 2 cells each).
-    num_y = _max_count_with_gap(geom.H_wall, geom.t, geom.p)
-    num_z = _max_count_with_gap(geom.W_wall, geom.t, geom.p)
-    used_y = num_y * geom.t + (num_y - 1) * geom.p
-    used_z = num_z * geom.t + (num_z - 1) * geom.p
-    y_start = (geom.H_wall - used_y) / 2
-    z_start = (geom.W_wall - used_z) / 2
+def _safe_location_in_mesh(
+    geom: GeometryParams, mesh: MeshingParams
+) -> tuple[float, float, float]:
+    """Pick a point strictly inside the kept *fluid* region.
 
-    if geom.p > 0 and num_y >= 2 and num_z >= 2:
-        y = y_start + geom.t + 0.5 * geom.p
-        z = z_start + geom.t + 0.5 * geom.p
-        return (0.0, y, z)
+    Requirements:
+    - Must be inside the blockMesh bounds.
+    - Must be outside all solid STL volumes (walls and fins).
+    - Must not lie on/too close to surfaces/mesh boundaries (numerical stability).
+    """
 
-    # Fallback: pick a point near the left wall-side in x, centered in y/z.
-    eps = min(1e-4, geom.gap * 1e-3)
-    x = -geom.gap / 2 + eps
-    y = geom.H_wall / 2
-    z = geom.W_wall / 2
-    return (x, y, z)
+    def _clamp(v: float, lo: float, hi: float) -> float:
+        return min(max(v, lo), hi)
+
+    def _grid_params() -> tuple[int, int, float, float, float, float, float]:
+        num_y = _max_count_with_gap(geom.H_wall, geom.t, geom.p)
+        num_z = _max_count_with_gap(geom.W_wall, geom.t, geom.p)
+        used_y = num_y * geom.t + (num_y - 1) * geom.p if num_y > 0 else 0.0
+        used_z = num_z * geom.t + (num_z - 1) * geom.p if num_z > 0 else 0.0
+        y_start = (geom.H_wall - used_y) / 2 if geom.H_wall > 0 else 0.0
+        z_start = (geom.W_wall - used_z) / 2 if geom.W_wall > 0 else 0.0
+        pitch = geom.t + geom.p
+        return num_y, num_z, used_y, used_z, y_start, z_start, pitch
+
+    def _cell_indices(
+        y: float, z: float, y_start: float, z_start: float, pitch: float
+    ) -> tuple[int, int]:
+        # y/z are expected to be within the used band when this is called.
+        iy = int((y - y_start) / pitch)
+        iz = int((z - z_start) / pitch)
+        return iy, iz
+
+    def _in_used_band(
+        y: float, z: float, y_start: float, z_start: float, used_y: float, used_z: float
+    ) -> bool:
+        return (y_start <= y <= y_start + used_y) and (z_start <= z <= z_start + used_z)
+
+    def _inside_fin_footprint(
+        y: float,
+        z: float,
+        y_start: float,
+        z_start: float,
+        used_y: float,
+        used_z: float,
+        pitch: float,
+    ) -> tuple[bool, int, int]:
+        if pitch <= 0:
+            return False, -1, -1
+        if not _in_used_band(y, z, y_start, z_start, used_y, used_z):
+            return False, -1, -1
+        iy, iz = _cell_indices(y, z, y_start, z_start, pitch)
+        # Guard against y/z at the upper boundary due to float rounding.
+        iy = min(max(iy, 0), max(0, num_y - 1))
+        iz = min(max(iz, 0), max(0, num_z - 1))
+        y0 = y_start + iy * pitch
+        z0 = z_start + iz * pitch
+        in_y = (y0 <= y) and (y < y0 + geom.t)
+        in_z = (z0 <= z) and (z < z0 + geom.t)
+        return (in_y and in_z), iy, iz
+
+    def _point_inside_wall_solid(x: float, y: float, z: float) -> bool:
+        if not (0.0 <= y <= geom.H_wall and 0.0 <= z <= geom.W_wall):
+            return False
+        if (-geom.gap / 2 - geom.T) <= x <= (-geom.gap / 2):
+            return True
+        if (geom.gap / 2) <= x <= (geom.gap / 2 + geom.T):
+            return True
+        return False
+
+    def _point_inside_fin_solid(
+        x: float,
+        y: float,
+        z: float,
+        y_start: float,
+        z_start: float,
+        used_y: float,
+        used_z: float,
+        pitch: float,
+    ) -> bool:
+        in_fp, iy, iz = _inside_fin_footprint(
+            y, z, y_start, z_start, used_y, used_z, pitch
+        )
+        if not in_fp:
+            return False
+        if (iy + iz) % 2 == 0:
+            # Left fin.
+            return (-geom.gap / 2) <= x <= (-geom.gap / 2 + geom.L)
+        # Right fin.
+        return (geom.gap / 2 - geom.L) <= x <= (geom.gap / 2)
+
+    num_y, num_z, used_y, used_z, y_start, z_start, pitch = _grid_params()
+
+    # Conservative epsilon: keep away from mesh boundaries and surfaces.
+    # OpenFOAM guidance is to stay away from faces/edges; 10-20% of cell size is a good rule.
+    cell_eps = max(1e-6, 0.2 * mesh.background_cell_size)
+    x_lo = -geom.gap / 2 + cell_eps
+    x_hi = geom.gap / 2 - cell_eps
+    y_lo = 0.0 + cell_eps
+    y_hi = geom.H_wall - cell_eps
+    z_lo = 0.0 + cell_eps
+    z_hi = geom.W_wall - cell_eps
+
+    if not (x_lo < x_hi and y_lo < y_hi and z_lo < z_hi):
+        raise ValueError(
+            "No room for a safe locationInMesh point: domain too small vs background_cell_size; reduce background_cell_size or increase dimensions."
+        )
+
+    # Candidate sets for y and z.
+    y_candidates: list[float] = []
+    z_candidates: list[float] = []
+
+    # 1) Prefer a y/z gap between fins.
+    if geom.p > 0 and pitch > 0:
+        if num_y >= 2:
+            y_candidates.append(y_start + geom.t + 0.5 * geom.p)
+        if num_z >= 2:
+            z_candidates.append(z_start + geom.t + 0.5 * geom.p)
+
+    # 2) Use leftover margins outside the fin band (if any).
+    y_margin_bot = y_start
+    y_margin_top = geom.H_wall - (y_start + used_y)
+    # Only use margin candidates if they can stay at least cell_eps away from the fin band.
+    if y_margin_bot > 2 * cell_eps:
+        y_candidates.append(0.5 * y_margin_bot)
+    if y_margin_top > 2 * cell_eps:
+        y_candidates.append(geom.H_wall - 0.5 * y_margin_top)
+
+    z_margin_bot = z_start
+    z_margin_top = geom.W_wall - (z_start + used_z)
+    if z_margin_bot > 2 * cell_eps:
+        z_candidates.append(0.5 * z_margin_bot)
+    if z_margin_top > 2 * cell_eps:
+        z_candidates.append(geom.W_wall - 0.5 * z_margin_top)
+
+    # 3) Always include centered values as a last resort.
+    y_candidates.append(geom.H_wall / 2)
+    z_candidates.append(geom.W_wall / 2)
+
+    # Deduplicate while preserving order.
+    def _uniq(vals: list[float]) -> list[float]:
+        out: list[float] = []
+        for v in vals:
+            if all(abs(v - w) > 1e-12 for w in out):
+                out.append(v)
+        return out
+
+    y_candidates = _uniq([_clamp(y, y_lo, y_hi) for y in y_candidates])
+    z_candidates = _uniq([_clamp(z, z_lo, z_hi) for z in z_candidates])
+
+    clearance = geom.gap - geom.L
+    for y_cand in y_candidates:
+        for z_cand in z_candidates:
+            y_try = y_cand
+            z_try = z_cand
+            # If (y,z) is not in any fin footprint, x=0 is safe (even when fins cross at x=0).
+            in_fp, iy, iz = _inside_fin_footprint(
+                y_try, z_try, y_start, z_start, used_y, used_z, pitch
+            )
+            if not in_fp:
+                x = 0.0
+            else:
+                # Move (y,z) away from fin footprint boundaries.
+                if geom.t <= 2 * cell_eps:
+                    continue
+
+                y0 = y_start + iy * pitch
+                z0 = z_start + iz * pitch
+                y_try = _clamp(y0 + 0.5 * geom.t, y_lo, y_hi)
+                z_try = _clamp(z0 + 0.5 * geom.t, z_lo, z_hi)
+
+                if clearance <= 2 * cell_eps:
+                    # In a fully tiled y-z plane and L ~ gap, there may be no fluid region.
+                    continue
+                if (iy + iz) % 2 == 0:
+                    # Left fin exists in this cell: pick x near the right wall inner face.
+                    x = x_hi
+                else:
+                    # Right fin exists in this cell: pick x near the left wall inner face.
+                    x = x_lo
+
+            # Validate point is outside solids.
+            if _point_inside_wall_solid(x, y_try, z_try):
+                continue
+            if _point_inside_fin_solid(
+                x, y_try, z_try, y_start, z_start, used_y, used_z, pitch
+            ):
+                continue
+
+            return (x, y_try, z_try)
+
+    raise ValueError(
+        "Failed to find a safe locationInMesh point in the kept fluid region; try increasing p (create y/z gaps), or ensure gap > L (provide clearance), or adjust H_wall/W_wall so fins do not tile the entire cross-section."
+    )
 
 
 def generate_snappyhexmeshdict_text(
@@ -176,15 +351,15 @@ def generate_snappyhexmeshdict_text(
     level = _surface_refinement_level(mesh.background_cell_size, target_size)
     level_pair = f"({level} {level})"
 
-    location = _safe_location_in_mesh(geom)
-    location_str = f"({location[0]:.6f} {location[1]:.6f} {location[2]:.6f})"
+    location = _safe_location_in_mesh(geom, mesh)
+    location_str = f"({location[0]:.10f} {location[1]:.10f} {location[2]:.10f})"
 
-    geometry_entries = []
-    refinement_entries = []
+    geometry_entries: list[str] = []
+    refinement_entries: list[str] = []
     for f in stl_files:
         name = f.stem
         geometry_entries.append(
-            f"    {f.name}\n    {{\n        type triSurfaceMesh;\n        name {name};\n    }}\n"
+            f'    {f.name}\n    {{\n        type triSurfaceMesh;\n        file "{f.name}";\n        name {name};\n    }}\n'
         )
         refinement_entries.append(
             "    "
@@ -341,6 +516,19 @@ def write_openfoam_case_files(
     tri_surface_dir = case_dir / "constant" / "triSurface"
     system_dir.mkdir(parents=True, exist_ok=True)
     tri_surface_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove previously generated STL files so snappyHexMeshDict does not pick up stale geometry.
+    for pattern in [
+        "wall_left.stl",
+        "wall_right.stl",
+        "fin_left_y*_z*.stl",
+        "fin_right_y*_z*.stl",
+    ]:
+        for f in tri_surface_dir.glob(pattern):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
 
     generate_fin_wall_geometry(
         gap=geom.gap,
