@@ -9,7 +9,6 @@
 ## Requirements
 
 - Python 3.11+
-- `uv`
 - OpenFOAM (최소 `blockMesh`, `splitMeshRegions`)
 
 ## What It Generates
@@ -52,19 +51,19 @@
 ### 1) case 파일만 생성
 
 ```bash
-uv run python openfoam_automation.py --write-only
+python3 openfoam_automation.py --write-only
 ```
 
 생성 전 `system/regionSolvers` 등 생성물을 정리하려면:
 
 ```bash
-uv run python openfoam_automation.py --write-only --clean-generated
+python3 openfoam_automation.py --write-only --clean-generated
 ```
 
 ### 2) 파라미터 지정 생성
 
 ```bash
-uv run python openfoam_automation.py \
+python3 openfoam_automation.py \
   --write-only \
   --gap 0.30 --T 0.025 --H-wall 0.100 --W-wall 0.050 \
   --p 0.001 --t 0.001 --L 0.120 \
