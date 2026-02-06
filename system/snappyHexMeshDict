@@ -139,6 +139,24 @@ castellatedMeshControls
 
     features
     (
+        { file "fin_left_y0_z0.eMesh"; level 1; }
+        { file "fin_left_y0_z2.eMesh"; level 1; }
+        { file "fin_left_y1_z1.eMesh"; level 1; }
+        { file "fin_left_y1_z3.eMesh"; level 1; }
+        { file "fin_left_y2_z0.eMesh"; level 1; }
+        { file "fin_left_y2_z2.eMesh"; level 1; }
+        { file "fin_left_y3_z1.eMesh"; level 1; }
+        { file "fin_left_y3_z3.eMesh"; level 1; }
+        { file "fin_right_y0_z1.eMesh"; level 1; }
+        { file "fin_right_y0_z3.eMesh"; level 1; }
+        { file "fin_right_y1_z0.eMesh"; level 1; }
+        { file "fin_right_y1_z2.eMesh"; level 1; }
+        { file "fin_right_y2_z1.eMesh"; level 1; }
+        { file "fin_right_y2_z3.eMesh"; level 1; }
+        { file "fin_right_y3_z0.eMesh"; level 1; }
+        { file "fin_right_y3_z2.eMesh"; level 1; }
+        { file "wall_left.eMesh"; level 1; }
+        { file "wall_right.eMesh"; level 1; }
     );
 
     refinementSurfaces
@@ -251,6 +269,10 @@ snapControls
     tolerance 2.0;
     nSolveIter 30;
     nRelaxIter 5;
+    explicitFeatureSnap true;
+    implicitFeatureSnap false;
+    multiRegionFeatureSnap true;
+    nFeatureSnapIter 15;
 }
 
 addLayersControls

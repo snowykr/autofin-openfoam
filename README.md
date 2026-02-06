@@ -42,6 +42,22 @@ Python 의존성은 `pyproject.toml`에 정의되어 있으며, 기본은 `numpy
   - 그리드 피치(중심 간격) = `t + p`
 - `L` : fin 길이 (x 방향, wall에서 gap 내부로 돌출)
 
+### Units (important)
+
+이 프로젝트의 길이 관련 파라미터는 OpenFOAM 좌표계 단위와 동일하며, 현재 설정(`blockMeshDict`의 `scale 1;`)에서는 **모두 미터(m)** 입니다.
+
+- Geometry
+  - `gap`, `T`, `H_wall`, `W_wall`, `t`, `p`, `L`: m
+- Meshing (CLI)
+  - `margin`: m
+  - `background_cell_size`: m
+  - `target_surface_cell_size`: m (`None`이면 자동으로 `max(t/2, 1e-6)` m 사용)
+- Meshing (내부 설정값)
+  - `max_local_cells`, `max_global_cells`, `min_refinement_cells`, `n_cells_between_levels`: 무차원(셀 개수/레벨 관련 정수)
+  - `resolve_feature_angle_deg`: degree (deg)
+
+즉, 예를 들어 `--t 0.005`는 fin 두께 5 mm(=0.005 m), `--background-cell-size 0.005`는 배경 셀 크기 5 mm를 의미합니다.
+
 ### Placement rule (checkerboard)
 
 `y-z` 단면에서 `t x t` 사각 셀을 `p` 간격으로 배열하고, 셀마다 fin을 하나씩 배치합니다.
