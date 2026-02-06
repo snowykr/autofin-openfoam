@@ -3,8 +3,8 @@
 좌/우 wall + checkerboard fin + 가운데 gap 유체를 OpenFOAM `blockMesh` 기반으로
 직접 생성하는 케이스 자동화 스크립트입니다.
 
-이 저장소의 현재 기본 전략은 **snappyHexMesh를 사용하지 않고**, 구조적(conformal) `blockMesh`
-격자에 `cellZone`을 직접 부여한 뒤 `splitMeshRegions`로 region을 분리하는 방식입니다.
+이 저장소는 구조적(conformal) `blockMesh` 격자에 `cellZone`을 직접 부여한 뒤
+`splitMeshRegions`로 region을 분리하는 방식을 사용합니다.
 
 ## Requirements
 
