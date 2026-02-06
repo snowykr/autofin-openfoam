@@ -20,12 +20,13 @@ Python 의존성은 `pyproject.toml`에 정의되어 있으며, 기본은 `numpy
 
 - `fin_wall_stl.py`
   - wall + fin STL 생성 로직
-  - 출력: `constant/triSurface/*.stl`
+  - 출력: `constant/triSurface/solid_left.stl`, `constant/triSurface/solid_right.stl`
 - `openfoam_automation.py`
   - STL 생성 + `system/blockMeshDict`, `system/snappyHexMeshDict`, `system/controlDict` 생성
+  - multi-region CHT용으로 `constant/materialProperties`, `system/fvSchemes`, `system/fvSolution`도 생성
   - 기본값으로 `system/surfaceFeaturesDict`(또는 `system/surfaceFeatureExtractDict`)도 생성
-  - `blockMesh` -> feature 추출 -> `snappyHexMesh -overwrite` 순서로 실행되어야 함
-  - `Allmesh` 스크립트를 함께 생성(특히 `--write-only` + Docker 워크플로우용)
+  - `blockMesh` -> feature 추출 -> `snappyHexMesh -overwrite` -> `splitMeshRegions` 순서로 실행되어야 함
+  - `Allmesh`(meshing) + `Allrun`(meshing + foamSetupCHT + foamMultiRun) 스크립트를 함께 생성
 
 ## Geometry / Parameters
 
@@ -56,7 +57,6 @@ Python 의존성은 `pyproject.toml`에 정의되어 있으며, 기본은 `numpy
 - Geometry
   - `gap`, `T`, `H_wall`, `W_wall`, `t`, `p`, `L`: m
 - Meshing (CLI)
-  - `margin`: m
   - `background_cell_size`: m
   - `target_surface_cell_size`: m (`None`이면 자동으로 `max(t/2, 1e-6)` m 사용)
   - `feature_included_angle_deg`: degree (deg, feature 추출 임계각)
@@ -73,9 +73,6 @@ fin은 좌/우 wall에 번갈아 붙는 checkerboard 패턴이며, fin들은 직
 
 ### Constraint
 
-fin이 중앙에서 서로 "교차(겹침)"하도록 하기 위해 아래 조건을 강제합니다.
-
-- `L > gap/2` : 좌/우 fin이 gap 중앙에서 x방향으로 겹치도록
 - `L <= gap` : 반대편 wall을 관통하지 않도록
 
 추가 제약(현재 `fin_wall_stl.py` 구현):
@@ -106,7 +103,7 @@ uv run python openfoam_automation.py --case-dir ./case1 --write-only
 
 ### 3) meshing까지 자동 실행
 
-meshing(`blockMesh`, feature 추출, `snappyHexMesh`) 실행 방법은 OpenFOAM을 어떻게 설치했는지에 따라 달라집니다.
+meshing(`blockMesh`, feature 추출, `snappyHexMesh`, `splitMeshRegions`) 실행 방법은 OpenFOAM을 어떻게 설치했는지에 따라 달라집니다.
 
 - 로컬에 OpenFOAM이 설치되어 있고, `blockMesh`/`snappyHexMesh`가 PATH에 잡히는 경우
 - macOS에서 `openfoam-dev-macos`(Docker)로 OpenFOAM을 쓰는 경우
@@ -123,10 +120,18 @@ uv run python openfoam_automation.py --write-only
 openfoam-dev-macos
 ./Allmesh
 
+# (선택) multi-region CHT 셋업 + 실행(OpenFOAM.org dev 워크플로우)
+./Allrun
+
 # Allmesh 없이 수동으로 하면:
 blockMesh
 surfaceFeatures
 snappyHexMesh -overwrite
+splitMeshRegions -cellZones -overwrite -defaultRegionName fluid
+
+# (선택) CHT 셋업 + 실행
+foamSetupCHT
+foamMultiRun
 ```
 
 참고:
@@ -139,7 +144,6 @@ uv run python openfoam_automation.py \
   --write-only \
   --gap 0.20 --T 0.01 --H-wall 0.10 --W-wall 0.10 \
   --p 0.02 --t 0.005 --L 0.12 \
-  --margin 0.02 \
   --background-cell-size 0.005 \
   --target-surface-cell-size 0.0025
 ```
@@ -175,11 +179,12 @@ paraview --data="$(pwd)/case.foam"
 
 ## Meshing notes
 
-- `blockMesh` 배경 도메인은 기본적으로 `y=[0, H_wall]`, `z=[0, W_wall]`로 타이트하게 생성합니다.
-  - 목적: wall slab의 모서리로 "바깥 영역"이 돌아나가면서 내부(gap)와 연결되는 것을 방지하고,
-    `snappyHexMesh`의 region 선택(`locationInMesh`)이 안정적으로 gap 내부만 남기도록 하기 위함입니다.
-- `locationInMesh`는 "남길 영역" 안에 반드시 있어야 하며, STL 표면이나 배경 격자 경계에 너무 가까우면 실패/오동작할 수 있습니다.
-  - `openfoam_automation.py`가 자동으로 안전한 점을 찾지만, 극단적인 파라미터(`p=0` + 단면 완전 타일링 + `L≈gap`)에서는 유체 영역이 거의/전혀 없어 실패할 수 있습니다.
+- `blockMesh` 배경 도메인은 `x=[-gap/2-T, +gap/2+T]`, `y=[0, H_wall]`, `z=[0, W_wall]`로 타이트하게 생성합니다.
+  - 목적: 물리적으로 필요한 영역(좌 고체 + gap 유체 + 우 고체)만 포함하기 위함입니다.
+- `snappyHexMesh`는 `insidePoints`(복수 점)로 fluid + solid 영역을 동시에 keep 하도록 생성됩니다.
+  - `refinementSurfaces`에서 `cellZone solid_left/solid_right; mode inside;`를 사용해 좌/우 solid cellZone을 만들고,
+    `splitMeshRegions -cellZones -overwrite -defaultRegionName fluid`로 region을 분리합니다.
+- `insidePoints`는 각 keep 대상 영역(유체 1점 + 좌/우 wall 내부 1점씩)에 있어야 하며, STL 표면이나 배경 격자 경계에 너무 가까우면 실패/오동작할 수 있습니다.
 
 CLI 전체 옵션은 아래로 확인할 수 있습니다.
 
@@ -192,21 +197,24 @@ uv run python openfoam_automation.py -h
 기본적으로 case 디렉토리에 아래가 생성됩니다.
 
 - `constant/triSurface/*.stl`
-  - `wall_left.stl`, `wall_right.stl`
-  - `fin_left_y{iy}_z{iz}.stl`, `fin_right_y{iy}_z{iz}.stl`
+  - `solid_left.stl`, `solid_right.stl`
+- `constant/materialProperties` (CHT용: foamSetupCHT 입력)
 - `system/blockMeshDict`
 - `system/snappyHexMeshDict`
 - `system/controlDict`
+- `system/fvSchemes`, `system/fvSolution`
   - 기본값으로 아래 중 하나가 생성됨
     - `system/surfaceFeaturesDict` (OpenFOAM.org/Foundation)
     - `system/surfaceFeatureExtractDict` (일부 배포판)
-  - `Allmesh` (blockMesh -> feature 추출 -> snappyHexMesh 실행 스크립트)
+  - `Allmesh` (blockMesh -> feature 추출 -> snappyHexMesh -> splitMeshRegions)
+  - `Allrun` (Allmesh -> foamSetupCHT -> foamMultiRun)
 
 ## Git notes
 
 - `constant/triSurface/*.stl`은 자동 생성 산출물이므로 `.gitignore`에 포함되어 있습니다.
 - `case.foam`은 ParaView용 로컬 더미 파일이며 `.gitignore`에 포함되어 있습니다.
 - `system/blockMeshDict`, `system/snappyHexMeshDict`, `system/controlDict`는 스크립트로 자동 생성되지만, 기본 케이스 설정 공유를 위해 현재 저장소에서 추적(버전 관리)합니다.
+  - 동일하게 `system/fvSchemes`, `system/fvSolution`, `constant/materialProperties`도 기본 템플릿으로 생성/추적합니다.
   - 파라미터 스윕 등으로 작업 트리를 더럽히고 싶지 않으면 `--case-dir`로 별도 디렉토리에 생성하세요.
 
 ## Manual OpenFOAM commands (if not using python runner)
@@ -214,8 +222,15 @@ uv run python openfoam_automation.py -h
 ```bash
 ./Allmesh
 
+./Allrun
+
 # 또는 수동 실행
 blockMesh
 surfaceFeatures
 snappyHexMesh -overwrite
+splitMeshRegions -cellZones -overwrite -defaultRegionName fluid
+
+# (선택) CHT 셋업 + 실행
+foamSetupCHT
+foamMultiRun
 ```

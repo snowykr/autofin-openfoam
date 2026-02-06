@@ -23,7 +23,6 @@ class GeometryParams:
 
 @dataclass(frozen=True)
 class MeshingParams:
-    margin: float = 0.02
     background_cell_size: float = 0.005
     target_surface_cell_size: float | None = None
     max_local_cells: int = 2_000_000
@@ -37,6 +36,18 @@ class MeshingParams:
     feature_snap: bool = True
     feature_tool: str = "surfaceFeatures"  # or "surfaceFeatureExtract"
     feature_extract_included_angle_deg: float = 150.0
+
+
+def _expected_stl_files(tri_surface_dir: Path) -> list[Path]:
+    """STLs that this project generates and snappy should consume."""
+
+    stls = [tri_surface_dir / "solid_left.stl", tri_surface_dir / "solid_right.stl"]
+    missing = [p for p in stls if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing expected STL files: " + ", ".join(str(p) for p in missing)
+        )
+    return stls
 
 
 def _max_count_with_gap(total_length: float, thickness: float, gap: float) -> int:
@@ -58,10 +69,10 @@ def _blockmesh_cell_count(length: float, cell_size: float, min_cells: int = 10) 
 
 
 def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> str:
-    x_min = -geom.gap / 2 - geom.T - mesh.margin
-    x_max = geom.gap / 2 + geom.T + mesh.margin
-    # Important: keep y/z tight to the wall extents so the region outside the
-    # wall+gap+wall footprint cannot connect around the wall edges.
+    # Physical domain (x) is exactly wall+gap+wall; no outer fluid margin.
+    x_min = -geom.gap / 2 - geom.T
+    x_max = geom.gap / 2 + geom.T
+    # Keep y/z tight to the wall extents.
     y_min = 0.0
     y_max = geom.H_wall
     z_min = 0.0
@@ -343,12 +354,37 @@ def _safe_location_in_mesh(
     )
 
 
+def _safe_inside_point_in_solid(
+    geom: GeometryParams, mesh: MeshingParams, *, side: str
+) -> tuple[float, float, float]:
+    """Pick a point strictly inside a wall solid volume (not on any faces)."""
+
+    if side not in {"left", "right"}:
+        raise ValueError("side must be 'left' or 'right'")
+
+    cell_eps = max(1e-6, 0.2 * mesh.background_cell_size)
+    if geom.T <= 2 * cell_eps:
+        raise ValueError(
+            "No safe solid inside point: wall thickness T too small vs background_cell_size; reduce background_cell_size or increase T."
+        )
+
+    if side == "left":
+        x = -geom.gap / 2 - 0.5 * geom.T
+        x = min(max(x, -geom.gap / 2 - geom.T + cell_eps), -geom.gap / 2 - cell_eps)
+    else:
+        x = geom.gap / 2 + 0.5 * geom.T
+        x = min(max(x, geom.gap / 2 + cell_eps), geom.gap / 2 + geom.T - cell_eps)
+
+    y = min(max(0.5 * geom.H_wall, cell_eps), geom.H_wall - cell_eps)
+    z = min(max(0.5 * geom.W_wall, cell_eps), geom.W_wall - cell_eps)
+
+    return (x, y, z)
+
+
 def generate_snappyhexmeshdict_text(
     geom: GeometryParams, mesh: MeshingParams, tri_surface_dir: Path
 ) -> str:
-    stl_files = sorted(tri_surface_dir.glob("*.stl"))
-    if not stl_files:
-        raise FileNotFoundError(f"No STL files found in {tri_surface_dir}")
+    stl_files = _expected_stl_files(tri_surface_dir)
 
     target_size = mesh.target_surface_cell_size
     if target_size is None:
@@ -357,8 +393,18 @@ def generate_snappyhexmeshdict_text(
     level = _surface_refinement_level(mesh.background_cell_size, target_size)
     level_pair = f"({level} {level})"
 
-    location = _safe_location_in_mesh(geom, mesh)
-    location_str = f"({location[0]:.10f} {location[1]:.10f} {location[2]:.10f})"
+    fluid_location = _safe_location_in_mesh(geom, mesh)
+    solid_left_location = _safe_inside_point_in_solid(geom, mesh, side="left")
+    solid_right_location = _safe_inside_point_in_solid(geom, mesh, side="right")
+
+    inside_points = [fluid_location, solid_left_location, solid_right_location]
+    inside_points_str = (
+        "(\n"
+        + "\n".join(
+            [f"        ({p[0]:.10f} {p[1]:.10f} {p[2]:.10f})" for p in inside_points]
+        )
+        + "\n    )"
+    )
 
     geometry_entries: list[str] = []
     refinement_entries: list[str] = []
@@ -368,13 +414,26 @@ def generate_snappyhexmeshdict_text(
         geometry_entries.append(
             f'    {f.name}\n    {{\n        type triSurfaceMesh;\n        file "{f.name}";\n        name {name};\n    }}\n'
         )
-        refinement_entries.append(
-            "    "
-            + name
-            + "\n    {\n        level "
-            + level_pair
-            + ";\n        patchInfo { type wall; }\n    }\n"
-        )
+        if name.startswith("solid_"):
+            refinement_entries.append(
+                "    "
+                + name
+                + "\n    {\n        level "
+                + level_pair
+                + ";\n        faceZone "
+                + name
+                + ";\n        cellZone "
+                + name
+                + ";\n        mode inside;\n    }\n"
+            )
+        else:
+            refinement_entries.append(
+                "    "
+                + name
+                + "\n    {\n        level "
+                + level_pair
+                + ";\n        patchInfo { type wall; }\n    }\n"
+            )
         if mesh.feature_snap:
             ext = (
                 "extendedFeatureEdgeMesh"
@@ -444,7 +503,8 @@ castellatedMeshControls
     {{
     }}
 
-    locationInMesh {location_str};
+    // Keep multiple disconnected regions (fluid + solids)
+    insidePoints {inside_points_str};
     allowFreeStandingZoneFaces true;
 }}
 
@@ -493,6 +553,9 @@ mergeTolerance 1e-6;
 
 
 def generate_controldict_text() -> str:
+    # Multi-region controlDict template (OpenFOAM.org dev):
+    # - no 'application' entry
+    # - foamSetupCHT generates system/regionSolvers
     return """/*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
 | \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
@@ -509,23 +572,23 @@ FoamFile
 }
 // Generated by openfoam_automation.py
 
-application     simpleFoam;
+#includeIfPresent "regionSolvers"
 
 startFrom       startTime;
 startTime       0;
 
 stopAt          endTime;
-endTime         1;
+endTime         500;
 
 deltaT          1;
 
 writeControl    timeStep;
-writeInterval   1;
+writeInterval   50;
 
-purgeWrite      0;
+purgeWrite      5;
 
 writeFormat     ascii;
-writePrecision  6;
+writePrecision  8;
 writeCompression off;
 
 timeFormat      general;
@@ -537,12 +600,130 @@ runTimeModifiable true;
 """
 
 
+def generate_fvschemes_text() -> str:
+    return """/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     |                                                 |
+|   \\  /    A nd           |                                                 |
+|    \\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSchemes;
+}
+// Generated by openfoam_automation.py
+
+ddtSchemes
+{
+}
+
+gradSchemes
+{
+}
+
+divSchemes
+{
+}
+
+laplacianSchemes
+{
+}
+
+interpolationSchemes
+{
+}
+
+snGradSchemes
+{
+}
+
+fluxRequired
+{
+}
+
+// ************************************************************************* //
+"""
+
+
+def generate_fvsolution_text() -> str:
+    return """/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     |                                                 |
+|   \\  /    A nd           |                                                 |
+|    \\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// Generated by openfoam_automation.py
+
+PIMPLE
+{
+    nOuterCorrectors 1;
+}
+
+// ************************************************************************* //
+"""
+
+
+def generate_materialproperties_text(
+    *,
+    fluid_material: str = "air",
+    solid_left_material: str = "copper",
+    solid_right_material: str = "copper",
+) -> str:
+    return f"""/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     |                                                 |
+|   \\  /    A nd           |                                                 |
+|    \\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      materialProperties;
+}}
+// Generated by openfoam_automation.py
+
+fluid
+{{
+    solver          fluid;
+    material        {fluid_material};
+}}
+
+solid_left
+{{
+    solver          solid;
+    material        {solid_left_material};
+}}
+
+solid_right
+{{
+    solver          solid;
+    material        {solid_right_material};
+}}
+
+// ************************************************************************* //
+"""
+
+
 def generate_surfacefeatureextractdict_text(
     tri_surface_dir: Path, mesh: MeshingParams
 ) -> str:
-    stl_files = sorted(tri_surface_dir.glob("*.stl"))
-    if not stl_files:
-        raise FileNotFoundError(f"No STL files found in {tri_surface_dir}")
+    stl_files = _expected_stl_files(tri_surface_dir)
 
     entries: list[str] = []
     for f in stl_files:
@@ -586,9 +767,7 @@ FoamFile
 def generate_surfacefeaturesdict_text(
     tri_surface_dir: Path, mesh: MeshingParams
 ) -> str:
-    stl_files = sorted(tri_surface_dir.glob("*.stl"))
-    if not stl_files:
-        raise FileNotFoundError(f"No STL files found in {tri_surface_dir}")
+    stl_files = _expected_stl_files(tri_surface_dir)
 
     surfaces_block = "\n".join([f'    "{f.name}"' for f in stl_files])
 
@@ -627,9 +806,11 @@ def write_openfoam_case_files(
     case_dir: Path, geom: GeometryParams, mesh: MeshingParams
 ) -> None:
     system_dir = case_dir / "system"
+    constant_dir = case_dir / "constant"
     tri_surface_dir = case_dir / "constant" / "triSurface"
     ext_features_dir = case_dir / "constant" / "extendedFeatureEdgeMesh"
     system_dir.mkdir(parents=True, exist_ok=True)
+    constant_dir.mkdir(parents=True, exist_ok=True)
     tri_surface_dir.mkdir(parents=True, exist_ok=True)
     ext_features_dir.mkdir(parents=True, exist_ok=True)
 
@@ -640,18 +821,19 @@ def write_openfoam_case_files(
         except FileNotFoundError:
             pass
 
+    # Remove stale foamSetupCHT output.
+    try:
+        (system_dir / "regionSolvers").unlink()
+    except FileNotFoundError:
+        pass
+
     # Remove previously generated STL files so snappyHexMeshDict does not pick up stale geometry.
-    for pattern in [
-        "wall_left.stl",
-        "wall_right.stl",
-        "fin_left_y*_z*.stl",
-        "fin_right_y*_z*.stl",
-    ]:
-        for f in tri_surface_dir.glob(pattern):
-            try:
-                f.unlink()
-            except FileNotFoundError:
-                pass
+    # NOTE: constant/triSurface is treated as autogenerated output in this repo.
+    for f in tri_surface_dir.glob("*.stl"):
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
 
     # Remove previously generated feature files (avoid stale feature snapping).
     for pattern in ["*.eMesh", "*.obj"]:
@@ -683,8 +865,14 @@ def write_openfoam_case_files(
     (system_dir / "controlDict").write_text(
         generate_controldict_text(), encoding="utf-8"
     )
+    (system_dir / "fvSchemes").write_text(generate_fvschemes_text(), encoding="utf-8")
+    (system_dir / "fvSolution").write_text(generate_fvsolution_text(), encoding="utf-8")
     (system_dir / "blockMeshDict").write_text(
         generate_blockmeshdict_text(geom, mesh), encoding="utf-8"
+    )
+
+    (constant_dir / "materialProperties").write_text(
+        generate_materialproperties_text(), encoding="utf-8"
     )
     if mesh.feature_snap:
         if mesh.feature_tool == "surfaceFeatures":
@@ -713,6 +901,7 @@ def write_openfoam_case_files(
         "  surfaceFeatureExtract > log.surfaceFeatureExtract 2>&1\n"
         "fi\n"
         "snappyHexMesh -overwrite > log.snappyHexMesh 2>&1\n"
+        "splitMeshRegions -cellZones -overwrite -defaultRegionName fluid > log.splitMeshRegions 2>&1\n"
     )
     allmesh_path = case_dir / "Allmesh"
     allmesh_path.write_text(allmesh, encoding="utf-8")
@@ -720,6 +909,22 @@ def write_openfoam_case_files(
         allmesh_path.chmod(0o755)
     except OSError:
         # Best-effort; e.g. on some filesystems chmod may be disallowed.
+        pass
+
+    # Optional helper for a full CHT run (OpenFOAM.org dev workflow).
+    allrun = (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "./Allmesh\n"
+        "foamSetupCHT > log.foamSetupCHT 2>&1\n"
+        "foamMultiRun > log.foamMultiRun 2>&1\n"
+        "paraFoam -touchAll > /dev/null 2>&1 || true\n"
+    )
+    allrun_path = case_dir / "Allrun"
+    allrun_path.write_text(allrun, encoding="utf-8")
+    try:
+        allrun_path.chmod(0o755)
+    except OSError:
         pass
 
 
@@ -731,6 +936,10 @@ def run_openfoam_meshing(case_dir: Path, mesh: MeshingParams) -> None:
     if shutil.which("snappyHexMesh") is None:
         raise FileNotFoundError(
             "snappyHexMesh not found in PATH (did you source OpenFOAM?)"
+        )
+    if shutil.which("splitMeshRegions") is None:
+        raise FileNotFoundError(
+            "splitMeshRegions not found in PATH (did you source OpenFOAM?)"
         )
     if mesh.feature_snap:
         if mesh.feature_tool == "surfaceFeatures":
@@ -751,6 +960,17 @@ def run_openfoam_meshing(case_dir: Path, mesh: MeshingParams) -> None:
         else:
             subprocess.run(["surfaceFeatureExtract"], cwd=str(case_dir), check=True)
     subprocess.run(["snappyHexMesh", "-overwrite"], cwd=str(case_dir), check=True)
+    subprocess.run(
+        [
+            "splitMeshRegions",
+            "-cellZones",
+            "-overwrite",
+            "-defaultRegionName",
+            "fluid",
+        ],
+        cwd=str(case_dir),
+        check=True,
+    )
 
 
 def main() -> int:
@@ -768,7 +988,6 @@ def main() -> int:
     parser.add_argument("--t", type=float, default=0.005)
     parser.add_argument("--L", type=float, default=0.12)
 
-    parser.add_argument("--margin", type=float, default=0.02)
     parser.add_argument("--background-cell-size", type=float, default=0.005)
     parser.add_argument("--target-surface-cell-size", type=float, default=None)
     parser.add_argument(
@@ -797,7 +1016,6 @@ def main() -> int:
         L=args.L,
     )
     mesh = MeshingParams(
-        margin=args.margin,
         background_cell_size=args.background_cell_size,
         target_surface_cell_size=args.target_surface_cell_size,
         feature_snap=args.feature_snap,

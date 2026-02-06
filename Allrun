@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+./Allmesh
+foamSetupCHT > log.foamSetupCHT 2>&1
+foamMultiRun > log.foamMultiRun 2>&1
+paraFoam -touchAll > /dev/null 2>&1 || true

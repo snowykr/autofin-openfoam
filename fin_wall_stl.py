@@ -1,8 +1,10 @@
+import math
+import os
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 from stl import mesh
-import os
-import math
-from typing import Any
 
 
 def create_box_stl(
@@ -51,6 +53,311 @@ def create_box_stl(
             box_mesh.vectors[i][j] = vertices[f[j], :]
 
     return box_mesh
+
+
+@dataclass(frozen=True)
+class FinFootprint:
+    ymin: float
+    ymax: float
+    zmin: float
+    zmax: float
+
+
+def _add_rect(
+    tris: list[np.ndarray],
+    v0: tuple[float, float, float],
+    v1: tuple[float, float, float],
+    v2: tuple[float, float, float],
+    v3: tuple[float, float, float],
+) -> None:
+    """Append two triangles for a rectangle (v0->v1->v2->v3 CCW as seen from outside)."""
+
+    tris.append(np.array([v0, v1, v2], dtype=float))
+    tris.append(np.array([v0, v2, v3], dtype=float))
+
+
+def _add_face_x(
+    tris: list[np.ndarray],
+    x: float,
+    y0: float,
+    y1: float,
+    z0: float,
+    z1: float,
+    outward: str,
+) -> None:
+    if outward == "+x":
+        _add_rect(
+            tris,
+            (x, y0, z0),
+            (x, y1, z0),
+            (x, y1, z1),
+            (x, y0, z1),
+        )
+        return
+    if outward == "-x":
+        _add_rect(
+            tris,
+            (x, y0, z0),
+            (x, y0, z1),
+            (x, y1, z1),
+            (x, y1, z0),
+        )
+        return
+    raise ValueError(f"Invalid outward={outward!r} for x-face")
+
+
+def _add_face_y(
+    tris: list[np.ndarray],
+    y: float,
+    x0: float,
+    x1: float,
+    z0: float,
+    z1: float,
+    outward: str,
+) -> None:
+    if outward == "+y":
+        _add_rect(
+            tris,
+            (x0, y, z0),
+            (x0, y, z1),
+            (x1, y, z1),
+            (x1, y, z0),
+        )
+        return
+    if outward == "-y":
+        _add_rect(
+            tris,
+            (x0, y, z0),
+            (x1, y, z0),
+            (x1, y, z1),
+            (x0, y, z1),
+        )
+        return
+    raise ValueError(f"Invalid outward={outward!r} for y-face")
+
+
+def _add_face_z(
+    tris: list[np.ndarray],
+    z: float,
+    x0: float,
+    x1: float,
+    y0: float,
+    y1: float,
+    outward: str,
+) -> None:
+    if outward == "+z":
+        _add_rect(
+            tris,
+            (x0, y0, z),
+            (x1, y0, z),
+            (x1, y1, z),
+            (x0, y1, z),
+        )
+        return
+    if outward == "-z":
+        _add_rect(
+            tris,
+            (x0, y0, z),
+            (x0, y1, z),
+            (x1, y1, z),
+            (x1, y0, z),
+        )
+        return
+    raise ValueError(f"Invalid outward={outward!r} for z-face")
+
+
+def _mesh_from_tris(tris: list[np.ndarray]) -> Any:
+    m: Any = mesh.Mesh(np.zeros(len(tris), dtype=mesh.Mesh.dtype))
+    for i, tri in enumerate(tris):
+        m.vectors[i] = tri
+    return m
+
+
+def _unique_sorted(vals: list[float], eps: float = 1e-12) -> list[float]:
+    if not vals:
+        return []
+    out: list[float] = []
+    for v in sorted(vals):
+        if not out or abs(v - out[-1]) > eps:
+            out.append(v)
+        else:
+            # Snap near-equals to the first value (stabilize grid splits)
+            out[-1] = out[-1]
+    return out
+
+
+def _in_fin(fp: FinFootprint, y: float, z: float, eps: float = 1e-15) -> bool:
+    return (fp.ymin - eps) <= y <= (fp.ymax + eps) and (fp.zmin - eps) <= z <= (
+        fp.zmax + eps
+    )
+
+
+def _inner_face_patches(
+    y_min: float,
+    y_max: float,
+    z_min: float,
+    z_max: float,
+    fins: list[FinFootprint],
+) -> list[tuple[float, float, float, float]]:
+    """Return rectangle patches on the wall inner face, with fin footprints removed.
+
+    Returned rectangles are in (y0, y1, z0, z1) with y0<y1, z0<z1.
+    """
+
+    if not fins:
+        return [(y_min, y_max, z_min, z_max)]
+
+    y_coords = [y_min, y_max]
+    z_coords = [z_min, z_max]
+    for fp in fins:
+        y_coords.extend([fp.ymin, fp.ymax])
+        z_coords.extend([fp.zmin, fp.zmax])
+
+    ys = _unique_sorted(y_coords)
+    zs = _unique_sorted(z_coords)
+    patches: list[tuple[float, float, float, float]] = []
+    for i in range(len(ys) - 1):
+        y0, y1 = ys[i], ys[i + 1]
+        if not (y0 < y1):
+            continue
+        y_mid = 0.5 * (y0 + y1)
+        for j in range(len(zs) - 1):
+            z0, z1 = zs[j], zs[j + 1]
+            if not (z0 < z1):
+                continue
+            z_mid = 0.5 * (z0 + z1)
+
+            if any(_in_fin(fp, y_mid, z_mid) for fp in fins):
+                continue
+            patches.append((y0, y1, z0, z1))
+
+    return patches
+
+
+def _yz_grid_from_fins(
+    y_min: float,
+    y_max: float,
+    z_min: float,
+    z_max: float,
+    fins: list[FinFootprint],
+) -> tuple[list[float], list[float]]:
+    y_coords = [y_min, y_max]
+    z_coords = [z_min, z_max]
+    for fp in fins:
+        y_coords.extend([fp.ymin, fp.ymax])
+        z_coords.extend([fp.zmin, fp.zmax])
+    return (_unique_sorted(y_coords), _unique_sorted(z_coords))
+
+
+def create_solid_wall_fin_stl(
+    *,
+    side: str,
+    gap: float,
+    T: float,
+    H_wall: float,
+    W_wall: float,
+    L: float,
+    fins: list[FinFootprint],
+) -> Any:
+    """Create a single watertight triSurface for wall+fins on one side.
+
+    This avoids coplanar duplicate faces at the wall-fin interface by:
+    - perforating the wall inner face with fin footprints
+    - omitting the fin base faces on the wall inner plane
+    """
+
+    if side not in {"left", "right"}:
+        raise ValueError("side must be 'left' or 'right'")
+
+    # Wall extents
+    if side == "left":
+        x_inner = -gap / 2
+        x_outer = -gap / 2 - T
+        wall_inner_outward = "+x"
+        fin_x0 = x_inner
+        fin_x1 = x_inner + L
+    else:
+        x_inner = gap / 2
+        x_outer = gap / 2 + T
+        wall_inner_outward = "-x"
+        fin_x0 = x_inner - L
+        fin_x1 = x_inner
+
+    x0, x1 = (x_outer, x_inner) if x_outer < x_inner else (x_inner, x_outer)
+
+    tris: list[np.ndarray] = []
+
+    # Build a shared (y,z) grid so all wall faces share vertices.
+    # Without this, the perforated inner face creates T-junctions against
+    # the non-subdivided side faces, which shows up as open edges.
+    ys, zs = _yz_grid_from_fins(0.0, H_wall, 0.0, W_wall, fins)
+
+    # --- Wall faces ---
+    # Outer face (subdivided on the shared grid)
+    outer_outward = "-x" if side == "left" else "+x"
+    for i in range(len(ys) - 1):
+        for j in range(len(zs) - 1):
+            _add_face_x(
+                tris,
+                x_outer,
+                ys[i],
+                ys[i + 1],
+                zs[j],
+                zs[j + 1],
+                outward=outer_outward,
+            )
+
+    # y-min / y-max (subdivide along z)
+    for j in range(len(zs) - 1):
+        _add_face_y(tris, 0.0, x0, x1, zs[j], zs[j + 1], outward="-y")
+        _add_face_y(tris, H_wall, x0, x1, zs[j], zs[j + 1], outward="+y")
+
+    # z-min / z-max (subdivide along y)
+    for i in range(len(ys) - 1):
+        _add_face_z(tris, 0.0, x0, x1, ys[i], ys[i + 1], outward="-z")
+        _add_face_z(tris, W_wall, x0, x1, ys[i], ys[i + 1], outward="+z")
+
+    # Inner face (perforated on the same shared grid)
+    for i in range(len(ys) - 1):
+        y0p, y1p = ys[i], ys[i + 1]
+        y_mid = 0.5 * (y0p + y1p)
+        for j in range(len(zs) - 1):
+            z0p, z1p = zs[j], zs[j + 1]
+            z_mid = 0.5 * (z0p + z1p)
+            if any(_in_fin(fp, y_mid, z_mid) for fp in fins):
+                continue
+            _add_face_x(
+                tris,
+                x_inner,
+                y0p,
+                y1p,
+                z0p,
+                z1p,
+                outward=wall_inner_outward,
+            )
+
+    # --- Fin faces (no base face on x_inner plane) ---
+    # Normalize fin x range for side faces
+    fx0 = min(fin_x0, fin_x1)
+    fx1 = max(fin_x0, fin_x1)
+
+    for fp in fins:
+        # Tip face
+        x_tip = fin_x1 if side == "left" else fin_x0
+        tip_outward = "+x" if side == "left" else "-x"
+        _add_face_x(
+            tris, x_tip, fp.ymin, fp.ymax, fp.zmin, fp.zmax, outward=tip_outward
+        )
+
+        # y faces
+        _add_face_y(tris, fp.ymin, fx0, fx1, fp.zmin, fp.zmax, outward="-y")
+        _add_face_y(tris, fp.ymax, fx0, fx1, fp.zmin, fp.zmax, outward="+y")
+
+        # z faces
+        _add_face_z(tris, fp.zmin, fx0, fx1, fp.ymin, fp.ymax, outward="-z")
+        _add_face_z(tris, fp.zmax, fx0, fx1, fp.ymin, fp.ymax, outward="+z")
+
+    return _mesh_from_tris(tris)
 
 
 def _max_count_with_gap(total_length: float, thickness: float, gap: float) -> int:
@@ -113,9 +420,7 @@ def generate_fin_wall_geometry(
     if p < 0 or t <= 0 or L <= 0:
         raise ValueError("p must be >= 0, and t, L must be > 0")
 
-    # 교차(겹침) + 반대쪽 wall 관통 방지 조건
-    if not (L > gap / 2):
-        raise ValueError("To make fins cross in the middle, require L > gap/2")
+    # 반대쪽 wall 관통 방지 조건
     if L > gap:
         raise ValueError("To avoid intersecting the opposite wall, require L <= gap")
 
@@ -138,46 +443,15 @@ def generate_fin_wall_geometry(
     used_z = num_z * t + (num_z - 1) * p
     z_start = (W_wall - used_z) / 2
 
-    # === 1. 왼쪽 Wall 생성 ===
-    wall_left_xmin = -gap / 2 - T
-    wall_left_xmax = -gap / 2
-    wall_left_ymin = 0
-    wall_left_ymax = H_wall
-    wall_left_zmin = 0
-    wall_left_zmax = W_wall
-
-    wall_left = create_box_stl(
-        wall_left_xmin,
-        wall_left_xmax,
-        wall_left_ymin,
-        wall_left_ymax,
-        wall_left_zmin,
-        wall_left_zmax,
-    )
-    wall_left.save(f"{output_dir}/wall_left.stl")
-    print(f"생성됨: wall_left.stl")
-
-    # === 2. 오른쪽 Wall 생성 ===
-    wall_right_xmin = gap / 2
-    wall_right_xmax = gap / 2 + T
-
-    wall_right = create_box_stl(
-        wall_right_xmin,
-        wall_right_xmax,
-        wall_left_ymin,
-        wall_left_ymax,
-        wall_left_zmin,
-        wall_left_zmax,
-    )
-    wall_right.save(f"{output_dir}/wall_right.stl")
-    print(f"생성됨: wall_right.stl")
-
-    # === 핀 생성 (y-z 단면에서 checkerboard 형태로 좌/우 wall에 번갈아 배치) ===
+    # === 핀 배치 (y-z 단면에서 checkerboard 형태로 좌/우 wall에 번갈아 배치) ===
     print(f"\n=== 자동 배치 결과 ===")
     print(
         f"y-z 그리드: {num_y} x {num_z} (총 {total_cells}) (좌 {left_count}, 우 {right_count})"
     )
     print(f"핀 단면 크기: {t} x {t}, 핀 간격(클리어런스): {p}\n")
+
+    left_fins: list[FinFootprint] = []
+    right_fins: list[FinFootprint] = []
 
     for iz in range(num_z):
         fin_zmin = z_start + iz * (t + p)
@@ -186,24 +460,38 @@ def generate_fin_wall_geometry(
             fin_ymin = y_start + iy * (t + p)
             fin_ymax = fin_ymin + t
 
+            fp = FinFootprint(fin_ymin, fin_ymax, fin_zmin, fin_zmax)
             if (iy + iz) % 2 == 0:
-                fin_xmin = -gap / 2
-                fin_xmax = -gap / 2 + L
-                fin = create_box_stl(
-                    fin_xmin, fin_xmax, fin_ymin, fin_ymax, fin_zmin, fin_zmax
-                )
-                fin.save(f"{output_dir}/fin_left_y{iy}_z{iz}.stl")
-                print(f"생성됨: fin_left_y{iy}_z{iz}.stl")
+                left_fins.append(fp)
             else:
-                fin_xmin = gap / 2 - L
-                fin_xmax = gap / 2
-                fin = create_box_stl(
-                    fin_xmin, fin_xmax, fin_ymin, fin_ymax, fin_zmin, fin_zmax
-                )
-                fin.save(f"{output_dir}/fin_right_y{iy}_z{iz}.stl")
-                print(f"생성됨: fin_right_y{iy}_z{iz}.stl")
+                right_fins.append(fp)
 
-    print(f"\n총 {2 + total_cells}개 STL 파일 생성 완료")
+    # === 단일 solid 표면(STL) 생성: wall+fin (좌/우 각각) ===
+    solid_left = create_solid_wall_fin_stl(
+        side="left",
+        gap=gap,
+        T=T,
+        H_wall=H_wall,
+        W_wall=W_wall,
+        L=L,
+        fins=left_fins,
+    )
+    solid_left.save(f"{output_dir}/solid_left.stl")
+    print("생성됨: solid_left.stl")
+
+    solid_right = create_solid_wall_fin_stl(
+        side="right",
+        gap=gap,
+        T=T,
+        H_wall=H_wall,
+        W_wall=W_wall,
+        L=L,
+        fins=right_fins,
+    )
+    solid_right.save(f"{output_dir}/solid_right.stl")
+    print("생성됨: solid_right.stl")
+
+    print("\n총 2개 STL 파일 생성 완료")
     print(f"저장 위치: {output_dir}/")
 
 
