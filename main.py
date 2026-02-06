@@ -1,44 +1,81 @@
 import numpy as np
 from stl import mesh
 import os
+import math
+from typing import Any
 
-def create_box_stl(xmin, xmax, ymin, ymax, zmin, zmax):
+
+def create_box_stl(
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+    zmin: float,
+    zmax: float,
+) -> Any:
     """육면체 STL 메쉬 생성"""
-    vertices = np.array([
-        [xmin, ymin, zmin],
-        [xmax, ymin, zmin],
-        [xmax, ymax, zmin],
-        [xmin, ymax, zmin],
-        [xmin, ymin, zmax],
-        [xmax, ymin, zmax],
-        [xmax, ymax, zmax],
-        [xmin, ymax, zmax]
-    ])
-    
+    vertices = np.array(
+        [
+            [xmin, ymin, zmin],
+            [xmax, ymin, zmin],
+            [xmax, ymax, zmin],
+            [xmin, ymax, zmin],
+            [xmin, ymin, zmax],
+            [xmax, ymin, zmax],
+            [xmax, ymax, zmax],
+            [xmin, ymax, zmax],
+        ]
+    )
+
     # 육면체를 구성하는 12개 삼각형 (STL 형식)
-    faces = np.array([
-        [0,3,1], [1,3,2],  # 아래면 (z=min)
-        [4,5,6], [4,6,7],  # 위면 (z=max)
-        [0,1,5], [0,5,4],  # 앞면 (y=min)
-        [2,3,7], [2,7,6],  # 뒷면 (y=max)
-        [0,4,7], [0,7,3],  # 왼쪽면 (x=min)
-        [1,2,6], [1,6,5]   # 오른쪽면 (x=max)
-    ])
-    
-    box_mesh = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
+    faces = np.array(
+        [
+            [0, 3, 1],
+            [1, 3, 2],  # 아래면 (z=min)
+            [4, 5, 6],
+            [4, 6, 7],  # 위면 (z=max)
+            [0, 1, 5],
+            [0, 5, 4],  # 앞면 (y=min)
+            [2, 3, 7],
+            [2, 7, 6],  # 뒷면 (y=max)
+            [0, 4, 7],
+            [0, 7, 3],  # 왼쪽면 (x=min)
+            [1, 2, 6],
+            [1, 6, 5],  # 오른쪽면 (x=max)
+        ]
+    )
+
+    box_mesh: Any = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
     for i, f in enumerate(faces):
         for j in range(3):
-            box_mesh.vectors[i][j] = vertices[f[j],:]
-    
+            box_mesh.vectors[i][j] = vertices[f[j], :]
+
     return box_mesh
 
 
-def generate_fin_wall_geometry(gap, T, H_wall, W_wall, p, t, L, 
-                                num_fins_per_side, num_layers, 
-                                output_dir="constant/triSurface"):
+def _max_count_with_gap(total_length: float, thickness: float, gap: float) -> int:
+    if total_length <= 0:
+        return 0
+    if thickness <= 0:
+        return 0
+    if gap < 0:
+        return 0
+    return int(math.floor((total_length + gap) / (thickness + gap) + 1e-12))
+
+
+def generate_fin_wall_geometry(
+    gap: float,
+    T: float,
+    H_wall: float,
+    W_wall: float,
+    p: float,
+    t: float,
+    L: float,
+    output_dir: str = "constant/triSurface",
+) -> None:
     """
     핀-벽 구조 STL 파일 자동 생성
-    
+
     Parameters:
     -----------
     gap : float
@@ -55,110 +92,132 @@ def generate_fin_wall_geometry(gap, T, H_wall, W_wall, p, t, L,
         fin의 두께
     L : float
         fin의 길이
-    num_fins_per_side : int
-        한쪽 wall당 핀 개수
-    num_layers : int
-        z 방향 레이어 개수
+    내부 계산:
+    ---------
+    핀 개수/레이어 개수는 주어진 (H_wall, W_wall, p, t)로부터 자동으로 최대화하여 계산
     output_dir : str
         STL 파일 저장 디렉토리
     """
-    
+
     # 출력 디렉토리 생성
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # 좌표계 정의
     # x: wall 사이 방향
     # y: wall의 세로 방향
     # z: 레이어 방향
-    
+
+    # === 파라미터 검증 + 핀 배치 최대화 계산 ===
+    if gap <= 0 or T <= 0 or H_wall <= 0 or W_wall <= 0:
+        raise ValueError("gap, T, H_wall, W_wall must be > 0")
+    if p < 0 or t <= 0 or L <= 0:
+        raise ValueError("p must be >= 0, and t, L must be > 0")
+
+    # 교차(겹침) + 반대쪽 wall 관통 방지 조건
+    if not (L > gap / 2):
+        raise ValueError("To make fins cross in the middle, require L > gap/2")
+    if L > gap:
+        raise ValueError("To avoid intersecting the opposite wall, require L <= gap")
+
+    num_y = _max_count_with_gap(H_wall, t, p)
+    num_z = _max_count_with_gap(W_wall, t, p)
+    if num_y < 1:
+        raise ValueError("Not enough space in H_wall to place any fins")
+    if num_z < 1:
+        raise ValueError("Not enough space in W_wall to place any fins")
+
+    total_cells = num_y * num_z
+    left_count = (total_cells + 1) // 2
+    right_count = total_cells // 2
+    if left_count < 1 or right_count < 1:
+        raise ValueError("Not enough space to place at least one fin on each wall")
+
+    used_y = num_y * t + (num_y - 1) * p
+    y_start = (H_wall - used_y) / 2
+
+    used_z = num_z * t + (num_z - 1) * p
+    z_start = (W_wall - used_z) / 2
+
     # === 1. 왼쪽 Wall 생성 ===
-    wall_left_xmin = -gap/2 - T
-    wall_left_xmax = -gap/2
+    wall_left_xmin = -gap / 2 - T
+    wall_left_xmax = -gap / 2
     wall_left_ymin = 0
     wall_left_ymax = H_wall
     wall_left_zmin = 0
     wall_left_zmax = W_wall
-    
-    wall_left = create_box_stl(wall_left_xmin, wall_left_xmax, 
-                                wall_left_ymin, wall_left_ymax,
-                                wall_left_zmin, wall_left_zmax)
-    wall_left.save(f'{output_dir}/wall_left.stl')
+
+    wall_left = create_box_stl(
+        wall_left_xmin,
+        wall_left_xmax,
+        wall_left_ymin,
+        wall_left_ymax,
+        wall_left_zmin,
+        wall_left_zmax,
+    )
+    wall_left.save(f"{output_dir}/wall_left.stl")
     print(f"생성됨: wall_left.stl")
-    
+
     # === 2. 오른쪽 Wall 생성 ===
-    wall_right_xmin = gap/2
-    wall_right_xmax = gap/2 + T
-    
-    wall_right = create_box_stl(wall_right_xmin, wall_right_xmax,
-                                 wall_left_ymin, wall_left_ymax,
-                                 wall_left_zmin, wall_left_zmax)
-    wall_right.save(f'{output_dir}/wall_right.stl')
+    wall_right_xmin = gap / 2
+    wall_right_xmax = gap / 2 + T
+
+    wall_right = create_box_stl(
+        wall_right_xmin,
+        wall_right_xmax,
+        wall_left_ymin,
+        wall_left_ymax,
+        wall_left_zmin,
+        wall_left_zmax,
+    )
+    wall_right.save(f"{output_dir}/wall_right.stl")
     print(f"생성됨: wall_right.stl")
-    
-    # === 3. 왼쪽 핀 생성 (오른쪽 방향으로 돌출) ===
-    # 핀은 y 방향으로 균등 배치
-    total_fin_space = (num_fins_per_side - 1) * p + num_fins_per_side * t
-    y_start = (H_wall - total_fin_space) / 2  # 중앙 정렬
-    
-    for layer in range(num_layers):
-        z_center = layer * (W_wall / num_layers) + (W_wall / (2 * num_layers))
-        
-        for i in range(num_fins_per_side):
-            y_pos = y_start + i * (t + p)
-            
-            fin_xmin = -gap/2
-            fin_xmax = -gap/2 + L
-            fin_ymin = y_pos
-            fin_ymax = y_pos + t
-            fin_zmin = z_center - t/2
-            fin_zmax = z_center + t/2
-            
-            fin = create_box_stl(fin_xmin, fin_xmax,
-                                fin_ymin, fin_ymax,
-                                fin_zmin, fin_zmax)
-            fin.save(f'{output_dir}/fin_left_layer{layer}_pin{i}.stl')
-            print(f"생성됨: fin_left_layer{layer}_pin{i}.stl")
-    
-    # === 4. 오른쪽 핀 생성 (왼쪽 방향으로 돌출, 교차 배치) ===
-    # 왼쪽 핀과 교차하도록 y 방향으로 offset
-    y_start_right = y_start + (t + p) / 2
-    
-    for layer in range(num_layers):
-        z_center = layer * (W_wall / num_layers) + (W_wall / (2 * num_layers))
-        
-        for i in range(num_fins_per_side):
-            y_pos = y_start_right + i * (t + p)
-            
-            fin_xmin = gap/2 - L
-            fin_xmax = gap/2
-            fin_ymin = y_pos
-            fin_ymax = y_pos + t
-            fin_zmin = z_center - t/2
-            fin_zmax = z_center + t/2
-            
-            fin = create_box_stl(fin_xmin, fin_xmax,
-                                fin_ymin, fin_ymax,
-                                fin_zmin, fin_zmax)
-            fin.save(f'{output_dir}/fin_right_layer{layer}_pin{i}.stl')
-            print(f"생성됨: fin_right_layer{layer}_pin{i}.stl")
-    
-    print(f"\n총 {2 + 2*num_fins_per_side*num_layers}개 STL 파일 생성 완료")
+
+    # === 핀 생성 (y-z 단면에서 checkerboard 형태로 좌/우 wall에 번갈아 배치) ===
+    print(f"\n=== 자동 배치 결과 ===")
+    print(
+        f"y-z 그리드: {num_y} x {num_z} (총 {total_cells}) (좌 {left_count}, 우 {right_count})"
+    )
+    print(f"핀 단면 크기: {t} x {t}, 핀 간격(클리어런스): {p}\n")
+
+    for iz in range(num_z):
+        fin_zmin = z_start + iz * (t + p)
+        fin_zmax = fin_zmin + t
+        for iy in range(num_y):
+            fin_ymin = y_start + iy * (t + p)
+            fin_ymax = fin_ymin + t
+
+            if (iy + iz) % 2 == 0:
+                fin_xmin = -gap / 2
+                fin_xmax = -gap / 2 + L
+                fin = create_box_stl(
+                    fin_xmin, fin_xmax, fin_ymin, fin_ymax, fin_zmin, fin_zmax
+                )
+                fin.save(f"{output_dir}/fin_left_y{iy}_z{iz}.stl")
+                print(f"생성됨: fin_left_y{iy}_z{iz}.stl")
+            else:
+                fin_xmin = gap / 2 - L
+                fin_xmax = gap / 2
+                fin = create_box_stl(
+                    fin_xmin, fin_xmax, fin_ymin, fin_ymax, fin_zmin, fin_zmax
+                )
+                fin.save(f"{output_dir}/fin_right_y{iy}_z{iz}.stl")
+                print(f"생성됨: fin_right_y{iy}_z{iz}.stl")
+
+    print(f"\n총 {2 + total_cells}개 STL 파일 생성 완료")
     print(f"저장 위치: {output_dir}/")
 
 
 # ========== 메인 실행 부분 ==========
 if __name__ == "__main__":
     # 파라미터 설정
-    gap = 0.20          # wall 사이 공간 (m)
-    T = 0.01            # wall 두께 (m)
-    H_wall = 0.10       # wall 세로 길이 (m)
-    W_wall = 0.10       # wall 가로 길이 (m)
-    p = 0.02            # fin 사이 간격 (m)
-    t = 0.005           # fin 두께 (m)
-    L = 0.08            # fin 길이 (m)
-    num_fins_per_side = 4   # 한쪽당 핀 개수
-    num_layers = 3          # 레이어 개수
-    
+    gap = 0.20  # wall 사이 공간 (m)
+    T = 0.01  # wall 두께 (m)
+    H_wall = 0.10  # wall 세로 길이 (m)
+    W_wall = 0.10  # wall 가로 길이 (m)
+    p = 0.02  # fin 사이 간격 (m)
+    t = 0.005  # fin 두께 (m)
+    L = 0.12  # fin 길이 (m)
+
     print("=== 파라미터 ===")
     print(f"wall 간격 (gap): {gap} m")
     print(f"wall 두께 (T): {T} m")
@@ -166,9 +225,8 @@ if __name__ == "__main__":
     print(f"fin 간격 (p): {p} m")
     print(f"fin 두께 (t): {t} m")
     print(f"fin 길이 (L): {L} m")
-    print(f"한쪽당 핀 개수: {num_fins_per_side}")
-    print(f"레이어 개수: {num_layers}\n")
-    
+    print("핀/레이어 개수는 자동으로 최대화하여 계산됩니다.\n")
+
     # STL 파일 생성
     generate_fin_wall_geometry(
         gap=gap,
@@ -178,7 +236,4 @@ if __name__ == "__main__":
         p=p,
         t=t,
         L=L,
-        num_fins_per_side=num_fins_per_side,
-        num_layers=num_layers
     )
-
