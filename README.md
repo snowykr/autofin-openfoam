@@ -43,7 +43,8 @@
 
 - `0 < L <= gap` 필수
   - 반대 wall 관통 방지를 위한 제약
-- `L = gap/2`는 피하세요 (x 중간 레이어가 0 두께가 되어 blockMesh가 실패할 수 있음)
+- `L <= gap/2`인 경우: 좌/우 fin이 x 방향으로 교차(중첩)되지 않음을 경고합니다.
+- `L == gap`인 경우: 극한(full-span) 케이스임을 경고합니다.
 - `gap > 0`, `T > 0`, `H_wall > 0`, `W_wall > 0`, `t > 0`, `p > 0`
 
 ## Usage
@@ -52,6 +53,12 @@
 
 ```bash
 uv run python openfoam_automation.py --write-only
+```
+
+생성 전 `system/regionSolvers` 등 생성물을 정리하려면:
+
+```bash
+uv run python openfoam_automation.py --write-only --clean-generated
 ```
 
 ### 2) 파라미터 지정 생성
@@ -89,10 +96,11 @@ splitMeshRegions -cellZones -overwrite -defaultRegionName fluid
 
 - 배경 도메인은 의미론적으로 정확하게 고정됩니다:
   - `x=[-gap/2-T, +gap/2+T]`
-  - `y/z`는 `pitch=(t+p)`의 정수 배가 되도록 최근접(half-up) 반올림된 실폭으로 생성됩니다
+  - `L` 경계값(`L=gap/2`, `L=gap`)에서는 0 두께 x 레이어를 자동 제거해 유효 블록만 생성합니다.
+  - `y/z`는 `pitch=(t+p)`의 정수 배가 되도록 최근접(half-up) 반올림된 실폭으로 생성되며, 각 방향 최소 2 유닛을 보장합니다.
   - wall 바깥 유체 슬랩을 만들지 않습니다.
 - 메쉬 밀도는 고정 분할 파라미터로 제어합니다.
-  - `N_T`, `N_gapA`, `N_over` : x 방향 5개 레이어 분할 수
+  - `N_T`, `N_gapA`, `N_over` : x 방향 분할 수(경계값에서는 0 두께 레이어 제거로 활성 레이어 수가 5보다 작아질 수 있음)
   - `N_t`, `N_p` : y/z 방향 fin 두께/간격 구간 분할 수
 
 ## Visualization

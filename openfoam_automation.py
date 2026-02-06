@@ -4,6 +4,7 @@ import argparse
 import math
 import shutil
 import subprocess
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,16 @@ def _validate_inputs(geom: GeometryParams, mesh: MeshingParams) -> None:
         raise ValueError("L must be > 0")
     if geom.L > geom.gap:
         raise ValueError("require L <= gap to avoid penetrating opposite wall")
+    if geom.L <= geom.gap / 2:
+        warnings.warn(
+            "L <= gap/2: left/right fins do not overlap in x (no crossing).",
+            stacklevel=2,
+        )
+    if math.isclose(geom.L, geom.gap, rel_tol=0.0, abs_tol=1e-12):
+        warnings.warn(
+            "L == gap: extreme full-span fin length case.",
+            stacklevel=2,
+        )
 
     for name, v in (
         ("N_T", mesh.N_T),
@@ -82,14 +93,16 @@ def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> st
 
     x2 = min(right_fin_tip, left_fin_tip)
     x3 = max(right_fin_tip, left_fin_tip)
-    x_coords = [left_outer, left_inner, x2, x3, right_inner, right_outer]
-
-    for i in range(len(x_coords) - 1):
-        if not (x_coords[i] < x_coords[i + 1]):
-            raise ValueError(
-                "Invalid x-layer ordering (zero/negative width layer). "
-                "Check L so that 0 < L < gap and avoid exactly L=gap/2."
-            )
+    x_coords_raw = [left_outer, left_inner, x2, x3, right_inner, right_outer]
+    tol = 1e-12
+    x_coords = [x_coords_raw[0]]
+    for x_val in x_coords_raw[1:]:
+        if x_val - x_coords[-1] > tol:
+            x_coords.append(x_val)
+        elif abs(x_val - x_coords[-1]) <= tol:
+            continue
+        else:
+            raise ValueError("Invalid x-layer ordering (negative width layer).")
 
     y_coords = [0.0]
     for _ in range(ny_units):
@@ -118,8 +131,21 @@ def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> st
                     f"    ({x_coords[ix]:.9f} {y_coords[iy]:.9f} {z_coords[iz]:.9f})"
                 )
 
-    nx_layer = [mesh.N_T, mesh.N_gapA, mesh.N_over, mesh.N_gapA, mesh.N_T]
-    has_overlap = geom.L > geom.gap / 2
+    x_mids = [(x_coords[i] + x_coords[i + 1]) * 0.5 for i in range(n_x - 1)]
+
+    nx_layer: list[int] = []
+    for ix_layer in range(n_x - 1):
+        x_left = x_coords[ix_layer]
+        x_right = x_coords[ix_layer + 1]
+        x_mid = x_mids[ix_layer]
+        if x_mid < left_inner or x_mid > right_inner:
+            nx_layer.append(mesh.N_T)
+        elif x_right <= x2 + tol:
+            nx_layer.append(mesh.N_gapA)
+        elif x_left >= x3 - tol:
+            nx_layer.append(mesh.N_gapA)
+        else:
+            nx_layer.append(mesh.N_over)
 
     blocks: list[str] = []
     for iz in range(n_z - 1):
@@ -137,7 +163,7 @@ def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> st
             is_left_fin = is_fin_site and ((grid_y + grid_z) % 2 == 0)
             is_right_fin = is_fin_site and not is_left_fin
 
-            for ix_layer in range(5):
+            for ix_layer in range(n_x - 1):
                 v0 = v_idx(ix_layer, iy, iz)
                 v1 = v_idx(ix_layer + 1, iy, iz)
                 v2 = v_idx(ix_layer + 1, iy + 1, iz)
@@ -147,21 +173,15 @@ def generate_blockmeshdict_text(geom: GeometryParams, mesh: MeshingParams) -> st
                 v6 = v_idx(ix_layer + 1, iy + 1, iz + 1)
                 v7 = v_idx(ix_layer, iy + 1, iz + 1)
 
-                if ix_layer == 0:
+                x_mid = x_mids[ix_layer]
+                if x_mid < left_inner:
                     zone = "solid_left"
-                elif ix_layer == 4:
+                elif x_mid > right_inner:
                     zone = "solid_right"
-                elif has_overlap:
-                    if is_left_fin and ix_layer in (1, 2):
-                        zone = "solid_left"
-                    elif is_right_fin and ix_layer in (2, 3):
-                        zone = "solid_right"
-                    else:
-                        zone = "fluid"
                 else:
-                    if is_left_fin and ix_layer == 1:
+                    if is_left_fin and x_mid <= left_fin_tip + tol:
                         zone = "solid_left"
-                    elif is_right_fin and ix_layer == 3:
+                    elif is_right_fin and x_mid >= right_fin_tip - tol:
                         zone = "solid_right"
                     else:
                         zone = "fluid"
@@ -465,17 +485,22 @@ solid_right
 
 
 def write_openfoam_case_files(
-    case_dir: Path, geom: GeometryParams, mesh: MeshingParams
+    case_dir: Path,
+    geom: GeometryParams,
+    mesh: MeshingParams,
+    *,
+    clean_generated: bool = False,
 ) -> None:
     system_dir = case_dir / "system"
     constant_dir = case_dir / "constant"
     system_dir.mkdir(parents=True, exist_ok=True)
     constant_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        (system_dir / "regionSolvers").unlink()
-    except FileNotFoundError:
-        pass
+    if clean_generated:
+        try:
+            (system_dir / "regionSolvers").unlink()
+        except FileNotFoundError:
+            pass
 
     for stale in [
         "surfaceFeaturesDict",
@@ -558,6 +583,11 @@ def main() -> int:
     )
     parser.add_argument("--case-dir", default=".")
     parser.add_argument("--write-only", action="store_true")
+    parser.add_argument(
+        "--clean-generated",
+        action="store_true",
+        help="remove generated helper files such as system/regionSolvers before writing",
+    )
 
     parser.add_argument("--gap", type=float, default=0.20)
     parser.add_argument("--T", type=float, default=0.01)
@@ -593,7 +623,9 @@ def main() -> int:
         N_p=args.N_p,
     )
 
-    write_openfoam_case_files(case_dir, geom, mesh)
+    write_openfoam_case_files(
+        case_dir, geom, mesh, clean_generated=bool(args.clean_generated)
+    )
     if not args.write_only:
         run_openfoam_meshing(case_dir)
 
