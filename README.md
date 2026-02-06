@@ -41,9 +41,10 @@
 
 ## Constraints (blockMesh-only)
 
-- `L <= gap` 필수
+- `0 < L <= gap` 필수
   - 반대 wall 관통 방지를 위한 제약
-- `gap > 0`, `T > 0`, `H_wall > 0`, `W_wall > 0`
+- `L = gap/2`는 피하세요 (x 중간 레이어가 0 두께가 되어 blockMesh가 실패할 수 있음)
+- `gap > 0`, `T > 0`, `H_wall > 0`, `W_wall > 0`, `t > 0`, `p > 0`
 
 ## Usage
 
@@ -60,7 +61,7 @@ uv run python openfoam_automation.py \
   --write-only \
   --gap 0.30 --T 0.025 --H-wall 0.100 --W-wall 0.050 \
   --p 0.001 --t 0.001 --L 0.120 \
-  --background-cell-size 0.002
+  --N-T 5 --N-gapA 3 --N-over 10 --N-t 5 --N-p 5
 ```
 
 ### 3) meshing 실행
@@ -87,10 +88,12 @@ splitMeshRegions -cellZones -overwrite -defaultRegionName fluid
 ## Notes
 
 - 배경 도메인은 의미론적으로 정확하게 고정됩니다:
-  - `x=[-gap/2-T, +gap/2+T]`, `y=[0, H_wall]`, `z=[0, W_wall]`
+  - `x=[-gap/2-T, +gap/2+T]`
+  - `y/z`는 `pitch=(t+p)`의 정수 배가 되도록 최근접(half-up) 반올림된 실폭으로 생성됩니다
   - wall 바깥 유체 슬랩을 만들지 않습니다.
-- `background_cell_size`는 블록별 셀 수를 결정합니다.
-  - 너무 크면 간극 해상도가 낮아집니다.
+- 메쉬 밀도는 고정 분할 파라미터로 제어합니다.
+  - `N_T`, `N_gapA`, `N_over` : x 방향 5개 레이어 분할 수
+  - `N_t`, `N_p` : y/z 방향 fin 두께/간격 구간 분할 수
 
 ## Visualization
 
