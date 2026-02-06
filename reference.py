@@ -27,9 +27,6 @@ N_p = 5  # Fin 간격(p) 방향 격자 수
 # [2] 파라미터 검증 및 자동 보정
 # =============================================================================
 
-if L <= gap / 2:
-    print(f"Error: L ({L}) must be > gap/2 ({gap / 2}) for overlap.")
-    exit(1)
 if L >= gap:
     print(f"Warning: L ({L}) >= gap ({gap}). Reducing L slightly.")
     L = gap - 1e-5
@@ -56,7 +53,7 @@ x_coords = [
     gap - L,  # x2 (Right Fin Tip)
     L,  # x3 (Left Fin Tip)
     gap,  # x4 (Right Wall Inner)
-    gap + T  # x5
+    gap + T,  # x5
 ]
 
 y_coords = [0.0]
@@ -80,11 +77,12 @@ nZ = len(z_coords)
 # [4] blockMeshDict 작성 함수
 # =============================================================================
 
+
 def get_vtx_idx(ix, iy, iz):
     return ix + (nX * iy) + (nX * nY * iz)
 
 
-with open(output_file, 'w') as f:
+with open(output_file, "w") as f:
     f.write(r"""/*--------------------------------*- C++ -*----------------------------------*\
 | =========                 |                                                 |
 | \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
@@ -107,7 +105,9 @@ scale 0.001; // mm
     for iz in range(nZ):
         for iy in range(nY):
             for ix in range(nX):
-                f.write(f"    ({x_coords[ix]:.6f} {y_coords[iy]:.6f} {z_coords[iz]:.6f})\n")
+                f.write(
+                    f"    ({x_coords[ix]:.6f} {y_coords[iy]:.6f} {z_coords[iz]:.6f})\n"
+                )
     f.write(");\n\n")
 
     # Blocks
@@ -117,10 +117,9 @@ scale 0.001; // mm
 
     for iz in range(nZ - 1):
         for iy in range(nY - 1):
-
             # 현재 구간이 Fin 두께(t) 구간인지 여부
-            is_y_fin = (iy % 2 == 0)
-            is_z_fin = (iz % 2 == 0)
+            is_y_fin = iy % 2 == 0
+            is_z_fin = iz % 2 == 0
 
             ny_mesh = N_t if is_y_fin else N_p
             nz_mesh = N_t if is_z_fin else N_p
@@ -177,7 +176,9 @@ scale 0.001; // mm
                         region_name = "fluid"
 
                 f.write(f"    hex ({v0} {v1} {v2} {v3} {v4} {v5} {v6} {v7}) ")
-                f.write(f" {region_name} ({nx_layer[ix_layer]} {ny_mesh} {nz_mesh}) simpleGrading (1 1 1) \n")
+                f.write(
+                    f" {region_name} ({nx_layer[ix_layer]} {ny_mesh} {nz_mesh}) simpleGrading (1 1 1) \n"
+                )
 
     f.write(");\n\n")
 
