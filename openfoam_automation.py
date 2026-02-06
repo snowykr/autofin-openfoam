@@ -7,6 +7,7 @@ import subprocess
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,24 @@ class MeshingParams:
     N_over: int = 10
     N_t: int = 5
     N_p: int = 5
+
+
+class CLIArgs(Protocol):
+    case_dir: str
+    write_only: bool
+    clean_generated: bool
+    gap: float
+    T: float
+    H_wall: float
+    W_wall: float
+    p: float
+    t: float
+    L: float
+    N_T: int
+    N_gapA: int
+    N_over: int
+    N_t: int
+    N_p: int
 
 
 def _validate_inputs(geom: GeometryParams, mesh: MeshingParams) -> None:
@@ -512,15 +531,19 @@ def write_openfoam_case_files(
         except FileNotFoundError:
             pass
 
-    (system_dir / "controlDict").write_text(
+    _ = (system_dir / "controlDict").write_text(
         generate_controldict_text(), encoding="utf-8"
     )
-    (system_dir / "fvSchemes").write_text(generate_fvschemes_text(), encoding="utf-8")
-    (system_dir / "fvSolution").write_text(generate_fvsolution_text(), encoding="utf-8")
-    (system_dir / "blockMeshDict").write_text(
+    _ = (system_dir / "fvSchemes").write_text(
+        generate_fvschemes_text(), encoding="utf-8"
+    )
+    _ = (system_dir / "fvSolution").write_text(
+        generate_fvsolution_text(), encoding="utf-8"
+    )
+    _ = (system_dir / "blockMeshDict").write_text(
         generate_blockmeshdict_text(geom, mesh), encoding="utf-8"
     )
-    (constant_dir / "materialProperties").write_text(
+    _ = (constant_dir / "materialProperties").write_text(
         generate_materialproperties_text(), encoding="utf-8"
     )
 
@@ -531,9 +554,9 @@ def write_openfoam_case_files(
         "splitMeshRegions -cellZones -overwrite -defaultRegionName fluid > log.splitMeshRegions 2>&1\n"
     )
     allmesh_path = case_dir / "Allmesh"
-    allmesh_path.write_text(allmesh, encoding="utf-8")
+    _ = allmesh_path.write_text(allmesh, encoding="utf-8")
     try:
-        allmesh_path.chmod(0o755)
+        _ = allmesh_path.chmod(0o755)
     except OSError:
         pass
 
@@ -546,9 +569,9 @@ def write_openfoam_case_files(
         "paraFoam -touchAll > /dev/null 2>&1 || true\n"
     )
     allrun_path = case_dir / "Allrun"
-    allrun_path.write_text(allrun, encoding="utf-8")
+    _ = allrun_path.write_text(allrun, encoding="utf-8")
     try:
-        allrun_path.chmod(0o755)
+        _ = allrun_path.chmod(0o755)
     except OSError:
         pass
 
@@ -563,8 +586,8 @@ def run_openfoam_meshing(case_dir: Path) -> None:
             "splitMeshRegions not found in PATH (did you source OpenFOAM?)"
         )
 
-    subprocess.run(["blockMesh"], cwd=str(case_dir), check=True)
-    subprocess.run(
+    _ = subprocess.run(["blockMesh"], cwd=str(case_dir), check=True)
+    _ = subprocess.run(
         [
             "splitMeshRegions",
             "-cellZones",
@@ -581,29 +604,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate reference-style blockMeshDict for checkerboard fin walls and run blockMesh + splitMeshRegions."
     )
-    parser.add_argument("--case-dir", default=".")
-    parser.add_argument("--write-only", action="store_true")
-    parser.add_argument(
+    _ = parser.add_argument("--case-dir", default=".")
+    _ = parser.add_argument("--write-only", action="store_true")
+    _ = parser.add_argument(
         "--clean-generated",
         action="store_true",
         help="remove generated helper files such as system/regionSolvers before writing",
     )
 
-    parser.add_argument("--gap", type=float, default=0.20)
-    parser.add_argument("--T", type=float, default=0.01)
-    parser.add_argument("--H-wall", type=float, default=0.10)
-    parser.add_argument("--W-wall", type=float, default=0.10)
-    parser.add_argument("--p", type=float, default=0.02)
-    parser.add_argument("--t", type=float, default=0.005)
-    parser.add_argument("--L", type=float, default=0.12)
+    _ = parser.add_argument("--gap", type=float, default=0.20)
+    _ = parser.add_argument("--T", type=float, default=0.01)
+    _ = parser.add_argument("--H-wall", type=float, default=0.10)
+    _ = parser.add_argument("--W-wall", type=float, default=0.10)
+    _ = parser.add_argument("--p", type=float, default=0.02)
+    _ = parser.add_argument("--t", type=float, default=0.005)
+    _ = parser.add_argument("--L", type=float, default=0.12)
 
-    parser.add_argument("--N-T", type=int, default=5)
-    parser.add_argument("--N-gapA", type=int, default=3)
-    parser.add_argument("--N-over", type=int, default=10)
-    parser.add_argument("--N-t", type=int, default=5)
-    parser.add_argument("--N-p", type=int, default=5)
+    _ = parser.add_argument("--N-T", type=int, default=5)
+    _ = parser.add_argument("--N-gapA", type=int, default=3)
+    _ = parser.add_argument("--N-over", type=int, default=10)
+    _ = parser.add_argument("--N-t", type=int, default=5)
+    _ = parser.add_argument("--N-p", type=int, default=5)
 
-    args = parser.parse_args()
+    args = cast(CLIArgs, cast(object, parser.parse_args()))
 
     case_dir = Path(args.case_dir).resolve()
     geom = GeometryParams(
