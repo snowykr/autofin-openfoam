@@ -1,4 +1,21 @@
-#!/bin/sh
-set -eu
-blockMesh > log.blockMesh 2>&1
-splitMeshRegions -cellZones -overwrite -defaultRegionName fluid > log.splitMeshRegions 2>&1
+#!/usr/bin/env bash
+set -euo pipefail
+
+run_with_log() {
+    local log_file="$1"
+    shift
+
+    set +e
+    if command -v stdbuf >/dev/null 2>&1; then
+        stdbuf -oL -eL "$@" 2>&1 | tee "$log_file"
+    else
+        "$@" 2>&1 | tee "$log_file"
+    fi
+    local cmd_status=${PIPESTATUS[0]}
+    set -e
+
+    return "$cmd_status"
+}
+
+run_with_log log.blockMesh blockMesh
+run_with_log log.splitMeshRegions splitMeshRegions -cellZones -overwrite -defaultRegionName fluid
